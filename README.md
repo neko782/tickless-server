@@ -157,6 +157,9 @@ Tests need Docker:
 
 ## Licensing
 
+Tickless's own code (the patches, new classes, build scripts, tools and docs) is released into
+the public domain under [the Unlicense](LICENSE).
+
 This repository contains no Minecraft code or binaries: the patches are applied at build time
 to sources decompiled from Mojang's official server jar by Mâché, and the build downloads that
 jar from Mojang. Use of Minecraft is subject to the
