@@ -1,0 +1,711 @@
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -68,6 +_,7 @@
+ import net.minecraft.util.Continuation;
+ import net.minecraft.util.CsvOutput;
+ import net.minecraft.util.Mth;
++import net.minecraft.util.TimeUtil;
+ import net.minecraft.util.ProgressListener;
+ import net.minecraft.util.Util;
+ import net.minecraft.util.datafix.DataFixTypes;
+@@ -178,6 +_,7 @@
+ import net.minecraft.world.phys.shapes.BooleanOp;
+ import net.minecraft.world.phys.shapes.Shapes;
+ import net.minecraft.world.phys.shapes.VoxelShape;
++import net.minecraft.world.level.parallel.WorldTxn;
+ import net.minecraft.world.ticks.LevelTicks;
+ import net.minecraft.world.waypoints.WaypointTransmitter;
+ import org.jspecify.annotations.Nullable;
+@@ -190,34 +_,40 @@
+     private static final IntProvider THUNDER_DELAY = UniformInt.of(12000, 180000);
+     public static final IntProvider THUNDER_DURATION = UniformInt.of(3600, 15600);
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private static final int EMPTY_TIME_NO_TICK = 300;
++    private static final long EMPTY_TIME_NO_TICK_NANOS = 15L * TimeUtil.NANOSECONDS_PER_SECOND;
+     private static final int MAX_SCHEDULED_TICKS_PER_TICK = 65536;
+     private static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
+-    private final List<ServerPlayer> players = Lists.newArrayList();
++    private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<>();
+     private final ServerChunkCache chunkSource;
+     private final MinecraftServer server;
+     private final ServerLevelData serverLevelData;
+-    private final EntityTickList entityTickList = new EntityTickList();
++    private final LevelEventScheduler eventScheduler;
++    // Entity tracker changes must reach the chunk map in the order they happened, even when they
++    // start on a world worker. Workers queue them; the server thread applies them.
++    private final java.util.Queue<Runnable> trackerUpdates = new java.util.concurrent.ConcurrentLinkedQueue<>();
++    private volatile int randomTickSpeed;
++    private volatile boolean spawnMobs;
+     private final ServerWaypointManager waypointManager;
+     private EnvironmentAttributeSystem environmentAttributes;
+     private final PersistentEntitySectionManager<Entity> entityManager;
+     private final GameEventDispatcher gameEventDispatcher;
+     public boolean noSave;
+     private final SleepStatus sleepStatus;
+-    private int emptyTime;
++    private volatile long emptySinceNanos = -1L;
+     private final PortalForcer portalForcer;
+     private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+     private final LevelTicks<Fluid> fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+     private final PathTypeCache pathTypesByPosCache = new PathTypeCache();
+-    private final Set<Mob> navigatingMobs = new ObjectOpenHashSet<>();
+-    private volatile boolean isUpdatingNavigations;
++    // Written by the server thread only (see tick).
++    private volatile long frozenMaintenanceRuns;
++    private final Set<Mob> navigatingMobs = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    private final Set<Mob> activeNavigatingMobs = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    private static final ThreadLocal<Boolean> UPDATING_NAVIGATIONS = ThreadLocal.withInitial(() -> false);
+     protected final Raids raids;
+-    private final ObjectLinkedOpenHashSet<BlockEventData> blockEvents = new ObjectLinkedOpenHashSet<>();
+-    private final List<BlockEventData> blockEventsToReschedule = new ArrayList<>(64);
+-    private boolean handlingTick;
++    private final ThreadLocal<Boolean> handlingTick = ThreadLocal.withInitial(() -> false);
+     private final List<CustomSpawner> customSpawners;
+     private @Nullable EnderDragonFight dragonFight;
+-    private final Int2ObjectMap<EnderDragonPart> dragonParts = new Int2ObjectOpenHashMap<>();
++    private final java.util.Map<Integer, EnderDragonPart> dragonParts = new java.util.concurrent.ConcurrentHashMap<>();
+     private final BiomeResolver uncachedBiomeResolver;
+     private final StructureManager structureManager;
+     private final StructureCheck structureCheck;
+@@ -239,6 +_,9 @@
+         super(levelData, dimension, server.registryAccess(), levelStem.type(), false, isDebug, biomeZoomSeed, server.getMaxChainedNeighborUpdates());
+         this.tickTime = tickTime;
+         this.server = server;
++        this.eventScheduler = new LevelEventScheduler(this, server.worldWorkers());
++        this.blockTicks.setOnTickAdded((chunkKey, tick) -> this.eventScheduler.onScheduledTickAdded(chunkKey, tick.triggerTick()));
++        this.fluidTicks.setOnTickAdded((chunkKey, tick) -> this.eventScheduler.onScheduledTickAdded(chunkKey, tick.triggerTick()));
+         this.customSpawners = customSpawners;
+         this.serverLevelData = levelData;
+         ChunkGenerator generator = levelStem.generator();
+@@ -256,6 +_,9 @@
+             server
+         );
+         this.entityManager = new PersistentEntitySectionManager<>(Entity.class, new ServerLevel.EntityCallbacks(), entityStorage);
++        // The game time, and while it is frozen the number of maintenance runs: entity box caches
++        // are rebuilt when this changes, so entities moved by players or commands show up.
++        this.entityManager.setBoxClock(() -> this.getGameTime() + (this.frozenMaintenanceRuns << 40));
+         this.chunkSource = new ServerChunkCache(
+             this,
+             levelStorage,
+@@ -306,13 +_,39 @@
+         this.environmentAttributes = EnvironmentAttributeSystem.builder().addDefaultLayers(this).build();
+         this.uncachedBiomeResolver = this.getChunkSource().getGenerator().getBiomeSource().createUncachedResolver(this.getChunkSource().randomState());
+         this.updateSkyBrightness();
++        this.spawnMobs = this.getGameRules().get(GameRules.SPAWN_MOBS);
++        this.eventScheduler.addPeriodicEvent(() -> {
++            if (this.tickRateManager().runsNormally()) {
++                this.raids.tick(this);
++            }
++        }, "raids", false);
++        this.eventScheduler.addPeriodicEvent(() -> {
++            EnderDragonFight fight = this.dragonFight;
++            if (fight != null && this.tickRateManager().runsNormally() && this.shouldUpdateEntities()) {
++                fight.tick();
++            }
++        }, "dragon fight", false);
++        this.eventScheduler.addPeriodicEvent(() -> {
++            if (this.tickRateManager().runsNormally() && this.spawnMobs) {
++                this.tickCustomSpawners(this.chunkSource.spawnsEnemies());
++            }
++        }, "custom spawners", false);
++        this.eventScheduler.addPeriodicEvent(this.chunkSource::runNaturalSpawning, "natural spawning", true);
++        this.eventScheduler.addPeriodicEvent(() -> {
++            if (this.tickRateManager().runsNormally()) {
++                this.eventScheduler.retryDeferredBlockEvents();
++            }
++        }, "deferred block events", true);
+     }
+ 
+     @Override
+     public int getNextEntityId() {
+         int id = 0;
++        // The tracker map is only safe to read on the server thread. The counter would have to wrap
++        // past two billion entities before an id taken on a worker could collide.
++        boolean checkTracker = this.server.isSameThread();
+ 
+-        while (id == 0 || this.chunkSource.hasEntityWithId(id)) {
++        while (id == 0 || checkTracker && this.chunkSource.hasEntityWithId(id)) {
+             id = ENTITY_COUNTER.incrementAndGet();
+         }
+ 
+@@ -356,13 +_,18 @@
+         return previous;
+     }
+ 
+-    public void tick(final BooleanSupplier haveTime) {
++    /** Advances the level clock, weather and sleep state on the server thread. */
++    public void advanceEnvironment() {
+         ProfilerFiller profiler = Profiler.get();
+-        this.handlingTick = true;
+         this.environmentAttributes().invalidateTickCache();
++        this.randomTickSpeed = this.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
++        this.spawnMobs = this.getGameRules().get(GameRules.SPAWN_MOBS);
+         TickRateManager tickRateManager = this.tickRateManager();
+         boolean runs = tickRateManager.runsNormally();
+         if (runs) {
++            if (this.dimension().equals(Level.OVERWORLD)) {
++                this.server.clockManager().tick();
++            }
+             profiler.push("world border");
+             this.getWorldBorder().tick();
+             profiler.popPush("weather");
+@@ -387,78 +_,28 @@
+         if (runs) {
+             this.tickTime();
+         }
+-
+-        profiler.push("tickPending");
+-        if (!this.isDebug() && runs) {
+-            long tick = this.getGameTime();
+-            profiler.push("blockTicks");
+-            this.blockTicks.tick(tick, 65536, this::tickBlock);
+-            profiler.popPush("fluidTicks");
+-            this.fluidTicks.tick(tick, 65536, this::tickFluid);
+-            profiler.pop();
+-        }
+-
+-        profiler.popPush("raid");
+-        if (runs) {
+-            this.raids.tick(this);
+-        }
+-
+-        profiler.popPush("chunkSource");
++        this.eventScheduler.updateGameTime(this.getGameTime());
++    }
++
++    /** Maintains chunk and entity storage; gameplay events have independent timers. */
++    public void tick(final BooleanSupplier haveTime) {
++        ProfilerFiller profiler = Profiler.get();
++        boolean runs = this.tickRateManager().runsNormally();
++        if (!runs) {
++            this.frozenMaintenanceRuns++;
++        }
++
++        profiler.push("chunkSource");
+         this.getChunkSource().tick(haveTime, true);
+-        profiler.popPush("blockEvents");
+-        if (runs) {
+-            this.runBlockEvents();
+-        }
+-
+-        this.handlingTick = false;
+         profiler.pop();
++        WorldTxn.mainSafePoint();
+         boolean isActive = this.chunkSource.hasActiveTickets();
+         if (isActive) {
+             this.resetEmptyTime();
+         }
+ 
+-        if (runs) {
+-            this.emptyTime++;
+-        }
+-
+-        if (this.emptyTime < 300) {
+-            profiler.push("entities");
+-            if (this.dragonFight != null && runs) {
+-                profiler.push("dragonFight");
+-                this.dragonFight.tick();
+-                profiler.pop();
+-            }
+-
+-            this.entityTickList
+-                .forEach(
+-                    entity -> {
+-                        if (!entity.isRemoved()) {
+-                            if (!tickRateManager.isEntityFrozen(entity)) {
+-                                profiler.push("checkDespawn");
+-                                entity.checkDespawn();
+-                                profiler.pop();
+-                                if (entity instanceof ServerPlayer
+-                                    || this.chunkSource.chunkMap.getDistanceManager().inEntityTickingRange(entity.chunkPosition().pack())) {
+-                                    Entity vehicle = entity.getVehicle();
+-                                    if (vehicle != null) {
+-                                        if (!vehicle.isRemoved() && vehicle.hasPassenger(entity)) {
+-                                            return;
+-                                        }
+-
+-                                        entity.stopRiding();
+-                                    }
+-
+-                                    profiler.push("tick");
+-                                    this.guardEntityTick(this::tickNonPassenger, entity);
+-                                    profiler.pop();
+-                                }
+-                            }
+-                        }
+-                    }
+-                );
+-            profiler.popPush("blockEntities");
+-            this.tickBlockEntities();
+-            profiler.pop();
++        if (runs && this.emptySinceNanos < 0L) {
++            this.emptySinceNanos = Util.getNanos();
+         }
+ 
+         profiler.push("entityManagement");
+@@ -466,10 +_,10 @@
+         profiler.pop();
+         profiler.push("debugSynchronizers");
+         if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
+-            this.neighborUpdater
++            this.neighborUpdater()
+                 .setDebugListener(blockPos -> this.debugSynchronizers.broadcastEventToTracking(blockPos, DebugSubscriptions.NEIGHBOR_UPDATES, blockPos));
+         } else {
+-            this.neighborUpdater.setDebugListener(null);
++            this.neighborUpdater().setDebugListener(null);
+         }
+ 
+         this.debugSynchronizers.tick(this.server.debugSubscribers());
+@@ -477,6 +_,59 @@
+         this.chunkSource.randomState().garbageCollect();
+     }
+ 
++    /** One entity update. Runs on a world worker, or on the server thread for players. */
++    public void tickEntityEvent(final Entity entity) {
++        TickRateManager tickRateManager = this.tickRateManager();
++        if (!entity.isRemoved() && this.eventScheduler.isTicking(entity) && this.shouldUpdateEntities()) {
++            if (!tickRateManager.isEntityFrozen(entity)) {
++                entity.checkDespawn();
++                if (entity instanceof ServerPlayer || this.chunkSource.chunkMap.getDistanceManager().inEntityTickingRange(entity.chunkPosition().pack())) {
++                    Entity vehicle = entity.getVehicle();
++                    if (vehicle != null) {
++                        if (!vehicle.isRemoved() && vehicle.hasPassenger(entity)) {
++                            return;
++                        }
++
++                        entity.stopRiding();
++                    }
++
++                    this.guardEntityTick(this::tickNonPassenger, entity);
++                }
++            }
++        }
++    }
++
++    @Override
++    public void addBlockEntityTicker(final TickingBlockEntity ticker) {
++        this.eventScheduler.onBlockEntityTickerAdded(ticker);
++    }
++
++    public LevelEventScheduler eventScheduler() {
++        return this.eventScheduler;
++    }
++
++    public int randomTickSpeed() {
++        return this.randomTickSpeed;
++    }
++
++    /** Applies tracker changes queued by world workers. Server thread only. */
++    public void runTrackerUpdates() {
++        Runnable update;
++        while ((update = this.trackerUpdates.poll()) != null) {
++            update.run();
++        }
++    }
++
++    private void onTracker(final Entity entity, final Runnable update) {
++        // Players join, leave and move only on the server thread, and their packets depend on the
++        // chunk map knowing them at once, so they never wait behind queued worker updates.
++        if (this.server.isSameThread() && (entity instanceof ServerPlayer || this.trackerUpdates.isEmpty())) {
++            update.run();
++        } else {
++            this.trackerUpdates.add(update);
++        }
++    }
++
+     @Override
+     public boolean shouldTickBlocksAt(final long chunkPos) {
+         return this.chunkSource.chunkMap.getDistanceManager().inBlockTickingRange(chunkPos);
+@@ -512,7 +_,10 @@
+ 
+         for (int i = 0; i < tickSpeed; i++) {
+             if (this.random.nextInt(48) == 0) {
+-                this.tickPrecipitation(this.getBlockRandomPos(minX, 0, minZ, 15));
++                BlockPos precipitationPos = this.getBlockRandomPos(minX, 0, minZ, 15);
++                this.eventScheduler.runBlockEvent(
++                    this.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, precipitationPos), () -> this.tickPrecipitation(precipitationPos), "precipitation"
++                );
+             }
+         }
+ 
+@@ -528,18 +_,23 @@
+ 
+                     for (int i = 0; i < tickSpeed; i++) {
+                         BlockPos pos = this.getBlockRandomPos(minX, minYInSection, minZ, 15);
+-                        profiler.push("randomTick");
+-                        BlockState blockState = section.getBlockState(pos.getX() - minX, pos.getY() - minYInSection, pos.getZ() - minZ);
+-                        if (blockState.isRandomlyTicking()) {
+-                            blockState.randomTick(this, pos, this.random);
+-                        }
+-
+-                        FluidState fluidState = blockState.getFluidState();
+-                        if (fluidState.isRandomlyTicking()) {
+-                            fluidState.randomTick(this, pos, this.random);
+-                        }
+-
+-                        profiler.pop();
++                        BlockState peek = section.getBlockState(pos.getX() - minX, pos.getY() - minYInSection, pos.getZ() - minZ);
++                        if (!peek.isRandomlyTicking() && !peek.getFluidState().isRandomlyTicking()) {
++                            // Most picks hit stone or air. Skip the event instead of locking them.
++                            continue;
++                        }
++
++                        this.eventScheduler.runBlockEvent(pos, () -> {
++                            BlockState blockState = this.getBlockState(pos);
++                            if (blockState.isRandomlyTicking()) {
++                                blockState.randomTick(this, pos, this.random);
++                            }
++
++                            FluidState fluidState = blockState.getFluidState();
++                            if (fluidState.isRandomlyTicking()) {
++                                fluidState.randomTick(this, pos, this.random);
++                            }
++                        }, "random tick");
+                     }
+                 }
+             }
+@@ -650,7 +_,7 @@
+     }
+ 
+     public boolean isHandlingTick() {
+-        return this.handlingTick;
++        return this.handlingTick.get();
+     }
+ 
+     public boolean canSleepThroughNights() {
+@@ -814,10 +_,24 @@
+     }
+ 
+     public void resetEmptyTime() {
+-        this.emptyTime = 0;
+-    }
+-
+-    private void tickFluid(final BlockPos pos, final Fluid type) {
++        this.emptySinceNanos = -1L;
++    }
++
++    private boolean shouldUpdateEntities() {
++        long emptySince = this.emptySinceNanos;
++        return emptySince < 0L || Util.getNanos() - emptySince < EMPTY_TIME_NO_TICK_NANOS;
++    }
++
++    void tickFluid(final BlockPos pos, final Fluid type) {
++        this.handlingTick.set(true);
++        try {
++            this.tickFluidNow(pos, type);
++        } finally {
++            this.handlingTick.set(false);
++        }
++    }
++
++    private void tickFluidNow(final BlockPos pos, final Fluid type) {
+         BlockState blockState = this.getBlockState(pos);
+         FluidState fluidState = blockState.getFluidState();
+         if (fluidState.is(type)) {
+@@ -825,7 +_,16 @@
+         }
+     }
+ 
+-    private void tickBlock(final BlockPos pos, final Block type) {
++    void tickBlock(final BlockPos pos, final Block type) {
++        this.handlingTick.set(true);
++        try {
++            this.tickBlockNow(pos, type);
++        } finally {
++            this.handlingTick.set(false);
++        }
++    }
++
++    private void tickBlockNow(final BlockPos pos, final Block type) {
+         BlockState state = this.getBlockState(pos);
+         if (state.is(type)) {
+             state.tick(this, pos, this.random);
+@@ -848,7 +_,7 @@
+     private void tickPassenger(final Entity vehicle, final Entity entity) {
+         if (entity.isRemoved() || entity.getVehicle() != vehicle) {
+             entity.stopRiding();
+-        } else if (entity instanceof Player || this.entityTickList.contains(entity)) {
++        } else if (entity instanceof Player || this.eventScheduler.isTicking(entity)) {
+             ProfilerFiller profiler = Profiler.get();
+             profiler.push(entity.typeHolder()::getRegisteredName);
+             profiler.incrementCounter("tickPassenger");
+@@ -1005,7 +_,23 @@
+             LOGGER.warn("Tried to add entity {} but it was marked as removed already", entity.typeHolder().getRegisteredName());
+             return false;
+         } else {
+-            return this.entityManager.addNewEntity(entity);
++            // In an event that can be rolled back, the new entity stays locked until the event
++            // commits, so no other event uses it before a rollback takes it out again.
++            boolean undoable = net.minecraft.world.level.parallel.WorldUndo.isLogging();
++            if (undoable) {
++                net.minecraft.world.level.parallel.WorldLocks.lockEntity(entity);
++            }
++
++            boolean added = this.entityManager.addNewEntity(entity);
++            if (added && undoable) {
++                net.minecraft.world.level.parallel.WorldUndo.action(() -> {
++                    if (!entity.isRemoved()) {
++                        entity.setRemoved(Entity.RemovalReason.DISCARDED);
++                    }
++                });
++            }
++
++            return added;
+         }
+     }
+ 
+@@ -1140,34 +_,52 @@
+ 
+     @Override
+     public void sendBlockUpdated(final BlockPos pos, final BlockState old, final BlockState current, final @Block.UpdateFlags int updateFlags) {
+-        if (this.isUpdatingNavigations) {
+-            String message = "recursive call to sendBlockUpdated";
++        if (UPDATING_NAVIGATIONS.get()) {
+             Util.logAndPauseIfInIde("recursive call to sendBlockUpdated", new IllegalStateException("recursive call to sendBlockUpdated"));
+         }
+ 
+         this.getChunkSource().blockChanged(pos);
+         this.pathTypesByPosCache.invalidate(pos);
++        // Navigation is an observation of block changes. Idle mobs have no path to invalidate.
++        if (this.activeNavigatingMobs.isEmpty()) {
++            return;
++        }
+         VoxelShape oldShape = old.getCollisionShape(this, pos);
+         VoxelShape newShape = current.getCollisionShape(this, pos);
+         if (Shapes.joinIsNotEmpty(oldShape, newShape, BooleanOp.NOT_SAME)) {
+             List<PathNavigation> navigationsToUpdate = new ObjectArrayList<>();
+ 
+-            for (Mob navigatingMob : this.navigatingMobs) {
+-                PathNavigation pathNavigation = navigatingMob.getNavigation();
++            for (Mob mob : this.activeNavigatingMobs) {
++                PathNavigation pathNavigation = mob.getNavigation();
+                 if (pathNavigation.shouldRecomputePath(pos)) {
+                     navigationsToUpdate.add(pathNavigation);
+                 }
+             }
+ 
+-            try {
+-                this.isUpdatingNavigations = true;
++            // Recomputing another mob's path here would run its pathfinder on this thread while
++            // its own update may be running. Mark the path stale; the mob replans on its next update.
++            for (PathNavigation navigation : navigationsToUpdate) {
++                navigation.markPathStale();
++            }
++        }
++    }
+ 
+-                for (PathNavigation navigation : navigationsToUpdate) {
+-                    navigation.recomputePath();
+-                }
+-            } finally {
+-                this.isUpdatingNavigations = false;
++    /** Derived path-notification membership; block/item writes still use their normal guards. */
++    public void updateActiveNavigation(final Mob mob, final PathNavigation navigation, final boolean active) {
++        // Some mobs replace their navigation as they grow or change movement mode.
++        // An obsolete navigation must not remove the new navigation's membership.
++        if (mob.getNavigation() != navigation) {
++            return;
++        }
++        if (active && this.navigatingMobs.contains(mob)) {
++            this.activeNavigatingMobs.add(mob);
++            // Tracking can end between the membership check and publication. In that
++            // ordering the tracking callback already removed this navigation.
++            if (!this.navigatingMobs.contains(mob)) {
++                this.activeNavigatingMobs.remove(mob);
+             }
++        } else {
++            this.activeNavigatingMobs.remove(mob);
+         }
+     }
+ 
+@@ -1178,26 +_,26 @@
+ 
+     @Override
+     public void updateNeighborsAt(final BlockPos pos, final Block sourceBlock, final @Nullable Orientation orientation) {
+-        this.neighborUpdater.updateNeighborsAtExceptFromFacing(pos, sourceBlock, null, orientation);
++        this.neighborUpdater().updateNeighborsAtExceptFromFacing(pos, sourceBlock, null, orientation);
+     }
+ 
+     @Override
+     public void updateNeighborsAtExceptFromFacing(
+         final BlockPos pos, final Block blockObject, final Direction skipDirection, final @Nullable Orientation orientation
+     ) {
+-        this.neighborUpdater.updateNeighborsAtExceptFromFacing(pos, blockObject, skipDirection, orientation);
++        this.neighborUpdater().updateNeighborsAtExceptFromFacing(pos, blockObject, skipDirection, orientation);
+     }
+ 
+     @Override
+     public void neighborChanged(final BlockPos pos, final Block changedBlock, final @Nullable Orientation orientation) {
+-        this.neighborUpdater.neighborChanged(pos, changedBlock, orientation);
++        this.neighborUpdater().neighborChanged(pos, changedBlock, orientation);
+     }
+ 
+     @Override
+     public void neighborChanged(
+         final BlockState state, final BlockPos pos, final Block changedBlock, final @Nullable Orientation orientation, final boolean movedByPiston
+     ) {
+-        this.neighborUpdater.neighborChanged(state, pos, changedBlock, orientation, movedByPiston);
++        this.neighborUpdater().neighborChanged(state, pos, changedBlock, orientation, movedByPiston);
+     }
+ 
+     @Override
+@@ -1242,7 +_,16 @@
+         };
+         Vec3 center = new Vec3(x, y, z);
+         ServerExplosion explosion = new ServerExplosion(this, source, damageSource, damageCalculator, center, r, fire, blockInteraction);
+-        int blockCount = explosion.explode();
++        int blockCount;
++        boolean marked = source != null && source.exploding.compareAndSet(false, true);
++        try {
++            blockCount = explosion.explode();
++        } finally {
++            if (marked) {
++                source.exploding.set(false);
++            }
++        }
++
+         ParticleOptions explosionParticle = explosion.isSmall() ? smallExplosionParticles : largeExplosionParticles;
+ 
+         for (ServerPlayer player : this.players) {
+@@ -1264,34 +_,32 @@
+ 
+     @Override
+     public void blockEvent(final BlockPos pos, final Block block, final int b0, final int b1) {
+-        this.blockEvents.add(new BlockEventData(pos, block, b0, b1));
++        this.eventScheduler.queueBlockEvent(new BlockEventData(pos.immutable(), block, b0, b1));
+     }
+ 
+-    private void runBlockEvents() {
+-        this.blockEventsToReschedule.clear();
+-
+-        while (!this.blockEvents.isEmpty()) {
+-            BlockEventData eventData = this.blockEvents.removeFirst();
+-            if (this.shouldTickBlocksAt(eventData.pos())) {
+-                if (this.doBlockEvent(eventData)) {
+-                    this.server
+-                        .getPlayerList()
+-                        .broadcast(
+-                            null,
+-                            eventData.pos().getX(),
+-                            eventData.pos().getY(),
+-                            eventData.pos().getZ(),
+-                            64.0,
+-                            this.dimension(),
+-                            new ClientboundBlockEventPacket(eventData.pos(), eventData.block(), eventData.paramA(), eventData.paramB())
+-                        );
+-                }
+-            } else {
+-                this.blockEventsToReschedule.add(eventData);
+-            }
+-        }
+-
+-        this.blockEvents.addAll(this.blockEventsToReschedule);
++    /** Runs one queued block event and tells nearby players. Called on a world worker. */
++    void runBlockEvent(final BlockEventData eventData) {
++        boolean handled;
++        this.handlingTick.set(true);
++        try {
++            handled = this.doBlockEvent(eventData);
++        } finally {
++            this.handlingTick.set(false);
++        }
++
++        if (handled) {
++            this.server
++                .getPlayerList()
++                .broadcast(
++                    null,
++                    eventData.pos().getX(),
++                    eventData.pos().getY(),
++                    eventData.pos().getZ(),
++                    64.0,
++                    this.dimension(),
++                    new ClientboundBlockEventPacket(eventData.pos(), eventData.block(), eventData.paramA(), eventData.paramB())
++                );
++        }
+     }
+ 
+     private boolean doBlockEvent(final BlockEventData eventData) {
+@@ -1798,7 +_,7 @@
+ 
+     @VisibleForTesting
+     public void clearBlockEvents(final BoundingBox bb) {
+-        this.blockEvents.removeIf(e -> bb.isInside(e.pos()));
++        this.eventScheduler.removeBlockEventsIf(e -> bb.isInside(e.pos()));
+     }
+ 
+     public Iterable<Entity> getAllEntities() {
+@@ -1915,6 +_,7 @@
+ 
+     @Override
+     public void close() throws IOException {
++        this.eventScheduler.stopTimers();
+         super.close();
+         this.entityManager.close();
+     }
+@@ -2035,17 +_,21 @@
+ 
+         @Override
+         public void onTickingStart(final Entity entity) {
+-            ServerLevel.this.entityTickList.add(entity);
++            ServerLevel.this.eventScheduler.onTickingStart(entity);
+         }
+ 
+         @Override
+         public void onTickingEnd(final Entity entity) {
+-            ServerLevel.this.entityTickList.remove(entity);
++            ServerLevel.this.eventScheduler.onTickingEnd(entity);
+         }
+ 
+         @Override
+         public void onTrackingStart(final Entity entity) {
+-            ServerLevel.this.getChunkSource().addEntity(entity);
++            ServerLevel.this.onTracker(entity, () -> {
++                if (!entity.isRemoved()) {
++                    ServerLevel.this.getChunkSource().addEntity(entity);
++                }
++            });
+             if (entity instanceof ServerPlayer player) {
+                 ServerLevel.this.players.add(player);
+                 if (player.isReceivingWaypoints()) {
+@@ -2060,14 +_,8 @@
+             }
+ 
+             if (entity instanceof Mob mob) {
+-                if (ServerLevel.this.isUpdatingNavigations) {
+-                    String message = "onTrackingStart called during navigation iteration";
+-                    Util.logAndPauseIfInIde(
+-                        "onTrackingStart called during navigation iteration", new IllegalStateException("onTrackingStart called during navigation iteration")
+-                    );
+-                }
+-
+                 ServerLevel.this.navigatingMobs.add(mob);
++                mob.getNavigation().refreshPathRegistration();
+             }
+ 
+             if (entity instanceof EnderDragon dragon) {
+@@ -2081,7 +_,7 @@
+ 
+         @Override
+         public void onTrackingEnd(final Entity entity) {
+-            ServerLevel.this.getChunkSource().removeEntity(entity);
++            ServerLevel.this.onTracker(entity, () -> ServerLevel.this.getChunkSource().removeEntity(entity));
+             if (entity instanceof ServerPlayer player) {
+                 ServerLevel.this.players.remove(player);
+                 ServerLevel.this.getWaypointManager().removePlayer(player);
+@@ -2089,14 +_,8 @@
+             }
+ 
+             if (entity instanceof Mob mob) {
+-                if (ServerLevel.this.isUpdatingNavigations) {
+-                    String message = "onTrackingStart called during navigation iteration";
+-                    Util.logAndPauseIfInIde(
+-                        "onTrackingStart called during navigation iteration", new IllegalStateException("onTrackingStart called during navigation iteration")
+-                    );
+-                }
+-
+                 ServerLevel.this.navigatingMobs.remove(mob);
++                ServerLevel.this.activeNavigatingMobs.remove(mob);
+             }
+ 
+             if (entity instanceof EnderDragon dragon) {

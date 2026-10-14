@@ -1,0 +1,14 @@
+--- a/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java
++++ b/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java
+@@ -41,6 +_,11 @@
+     }
+ 
+     @Override
++    public void getHardColliders(final AABB bb, final Consumer<T> output) {
++        this.sectionStorage.getHardColliders(bb, AbortableIterationConsumer.forConsumer(output));
++    }
++
++    @Override
+     public <U extends T> void get(final EntityTypeTest<T, U> type, final AABB bb, final AbortableIterationConsumer<U> consumer) {
+         this.sectionStorage.getEntities(type, bb, consumer);
+     }

@@ -1,0 +1,32 @@
+--- a/net/minecraft/world/entity/ai/behavior/ShufflingList.java
++++ b/net/minecraft/world/entity/ai/behavior/ShufflingList.java
+@@ -14,6 +_,7 @@
+ import net.minecraft.util.RandomSource;
+ 
+ public class ShufflingList<U> implements Iterable<U> {
++    private static final Comparator<ShufflingList.WeightedEntry<?>> RANDOM_ORDER = Comparator.comparingDouble(ShufflingList.WeightedEntry::getRandWeight);
+     protected final List<ShufflingList.WeightedEntry<U>> entries;
+     private final RandomSource random = RandomSource.create();
+ 
+@@ -35,9 +_,19 @@
+     }
+ 
+     public ShufflingList<U> shuffle() {
+-        this.entries.forEach(k -> k.setRandom(this.random.nextFloat()));
+-        this.entries.sort(Comparator.comparingDouble(ShufflingList.WeightedEntry::getRandWeight));
++        for (int i = 0; i < this.entries.size(); i++) {
++            this.entries.get(i).setRandom(this.random.nextFloat());
++        }
++        this.entries.sort(RANDOM_ORDER);
+         return this;
++    }
++
++    public int size() {
++        return this.entries.size();
++    }
++
++    public U get(final int index) {
++        return this.entries.get(index).getData();
+     }
+ 
+     public Stream<U> stream() {

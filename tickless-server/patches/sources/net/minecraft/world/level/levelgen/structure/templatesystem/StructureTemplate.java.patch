@@ -1,0 +1,12 @@
+--- a/net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate.java
++++ b/net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate.java
+@@ -822,7 +_,8 @@
+ 
+     public static final class Palette {
+         private final List<StructureTemplate.StructureBlockInfo> blocks;
+-        private final Map<Block, List<StructureTemplate.StructureBlockInfo>> cache = Maps.newHashMap();
++        // Chunk generation fills this from several threads at once.
++        private final Map<Block, List<StructureTemplate.StructureBlockInfo>> cache = new java.util.concurrent.ConcurrentHashMap<>();
+         private @Nullable List<StructureTemplate.JigsawBlockInfo> cachedJigsaws;
+ 
+         private Palette(final List<StructureTemplate.StructureBlockInfo> blocks) {

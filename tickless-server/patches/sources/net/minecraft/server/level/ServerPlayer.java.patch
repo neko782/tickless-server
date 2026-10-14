@@ -1,0 +1,26 @@
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -211,6 +_,8 @@
+ import org.slf4j.Logger;
+ 
+ public class ServerPlayer extends Player {
++    // A chunk map update for this player is queued for the server thread (see ServerChunkCache.move).
++    public final java.util.concurrent.atomic.AtomicBoolean chunkMoveQueued = new java.util.concurrent.atomic.AtomicBoolean();
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private static final int NEUTRAL_MOB_DEATH_NOTIFICATION_RADII_XZ = 32;
+     private static final int NEUTRAL_MOB_DEATH_NOTIFICATION_RADII_Y = 10;
+@@ -1140,6 +_,14 @@
+     public @Nullable ServerPlayer teleport(final TeleportTransition transition) {
+         if (this.isRemoved()) {
+             return null;
++        }
++
++        if (transition.newLevel().dimension() != this.level().dimension() && !this.server.isSameThread()) {
++            // Moving between levels changes their player lists and chunk maps, which belong to the
++            // server thread. The player's lane (or a worker, for an ender pearl) waits for it.
++            return net.minecraft.world.level.parallel.WorldTxn.awaitServerThread(
++                java.util.concurrent.CompletableFuture.supplyAsync(() -> this.teleport(transition), this.server)
++            );
+         }
+ 
+         if (transition.missingRespawnBlock()) {

@@ -1,0 +1,22 @@
+--- a/net/minecraft/world/entity/ai/sensing/VillagerBabiesSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/VillagerBabiesSensor.java
+@@ -1,6 +_,5 @@
+ package net.minecraft.world.entity.ai.sensing;
+ 
+-import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableSet;
+ import java.util.List;
+ import java.util.Set;
+@@ -22,11 +_,7 @@
+     }
+ 
+     private List<LivingEntity> getNearestVillagerBabies(final LivingEntity myBody) {
+-        return ImmutableList.copyOf(this.getVisibleEntities(myBody).findAll(this::isVillagerBaby));
+-    }
+-
+-    private boolean isVillagerBaby(final LivingEntity entity) {
+-        return entity.is(EntityTypes.VILLAGER) && entity.isBaby();
++        return this.getVisibleEntities(myBody).findAll(EntityTypes.VILLAGER, LivingEntity::isBaby);
+     }
+ 
+     private NearestVisibleLivingEntities getVisibleEntities(final LivingEntity myBody) {

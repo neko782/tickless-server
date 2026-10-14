@@ -1,0 +1,74 @@
+--- a/net/minecraft/network/syncher/SynchedEntityData.java
++++ b/net/minecraft/network/syncher/SynchedEntityData.java
+@@ -9,6 +_,8 @@
+ import java.util.Objects;
+ import net.minecraft.network.RegistryFriendlyByteBuf;
+ import net.minecraft.util.ClassTreeIdRegistry;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.parallel.WorldLocks;
+ import org.apache.commons.lang3.ObjectUtils;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -58,12 +_,41 @@
+     }
+ 
+     public <T> void set(final EntityDataAccessor<T> accessor, final T value, final boolean forceDirty) {
++        if (!forceDirty && !ObjectUtils.notEqual(value, this.getItem(accessor).getValue())) {
++            // Unchanged: nothing to lock, log or send. Entities rewrite the same air supply,
++            // frozen ticks and flags every step. Read without the owner's lock; a write racing
++            // with this one wins as if it came after it.
++            return;
++        }
++
++        if (this.entity instanceof Entity owner) {
++            // Synced data is the state other entities most often change directly, so lock the
++            // owner here instead of at every caller.
++            WorldLocks.lockEntity(owner);
++        }
++
+         SynchedEntityData.DataItem<T> dataItem = this.getItem(accessor);
+         if (forceDirty || ObjectUtils.notEqual(value, dataItem.getValue())) {
+-            dataItem.setValue(value);
++            // The entity tracker packs dirty values on the server thread while the entity updates
++            // on a world worker; the monitor keeps a value and its dirty flag together.
++            T old = dataItem.getValue();
++            synchronized (this) {
++                dataItem.setValue(value);
++                dataItem.setDirty(true);
++                this.isDirty = true;
++            }
++
++            // A rollback sets the old value back the same way, so clients see it again.
++            net.minecraft.world.level.parallel.WorldUndo.action(() -> {
++                synchronized (this) {
++                    dataItem.setValue(old);
++                    dataItem.setDirty(true);
++                    this.isDirty = true;
++                }
++
++                this.entity.onSyncedDataUpdated(accessor);
++            });
+             this.entity.onSyncedDataUpdated(accessor);
+-            dataItem.setDirty(true);
+-            this.isDirty = true;
+         }
+     }
+ 
+@@ -71,7 +_,7 @@
+         return this.isDirty;
+     }
+ 
+-    public @Nullable List<SynchedEntityData.DataValue<?>> packDirty() {
++    public synchronized @Nullable List<SynchedEntityData.DataValue<?>> packDirty() {
+         if (!this.isDirty) {
+             return null;
+         }
+@@ -89,7 +_,7 @@
+         return result;
+     }
+ 
+-    public @Nullable List<SynchedEntityData.DataValue<?>> getNonDefaultValues() {
++    public synchronized @Nullable List<SynchedEntityData.DataValue<?>> getNonDefaultValues() {
+         List<SynchedEntityData.DataValue<?>> result = null;
+ 
+         for (SynchedEntityData.DataItem<?> dataItem : this.itemsById) {

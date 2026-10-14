@@ -1,0 +1,12 @@
+--- a/net/minecraft/server/level/TicketType.java
++++ b/net/minecraft/server/level/TicketType.java
+@@ -23,6 +_,9 @@
+     public static final TicketType PORTAL = register("portal", 300L, FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE);
+     public static final TicketType ENDER_PEARL = register("ender_pearl", 40L, FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE);
+     public static final TicketType UNKNOWN = register("unknown", 1L, FLAG_CAN_EXPIRE_IF_UNLOADED | FLAG_LOADING);
++    // A world worker waiting for a chunk load; unlike UNKNOWN it lasts until the chunk is ready,
++    // since nothing holds the server thread until then.
++    public static final TicketType WORKER_LOAD = register("worker_load", 1L, FLAG_LOADING);
+ 
+     private static TicketType register(final String name, final long timeout, final @TicketType.Flags int flags) {
+         return Registry.register(BuiltInRegistries.TICKET_TYPE, name, new TicketType(timeout, flags));

@@ -1,0 +1,293 @@
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -37,9 +_,18 @@
+ 
+ public class Brain<E extends LivingEntity> {
+     private static final int SCHEDULE_UPDATE_DELAY = 20;
+-    private final Map<MemoryModuleType<?>, MemorySlot<?>> memories = Maps.newHashMap();
++    /** The entity this belongs to, set when an entity stores it in a field; see WorldOwnership.adopt. */
++    public net.minecraft.world.entity.@org.jspecify.annotations.Nullable Entity worldOwner;
++    // Registration changes publish a new indexed array; memory cells themselves are stable. Reads and
++    // single-cell hints can race without acquiring another entity's world lock.
++    private Map<MemoryModuleType<?>, MemorySlot<?>> memories = Map.of();
++    private @Nullable Map<MemoryModuleType<?>, MemorySlot<?>> registrationBuffer;
++    private volatile MemorySlot<?>[] memoryCells = new MemorySlot<?>[0];
++    private MemorySlot<?>[] registeredMemoryCells = new MemorySlot<?>[0];
++    private BehaviorControl<? super E>[] runningScratch = new BehaviorControl[0];
+     private final Map<SensorType<? extends Sensor<? super E>>, Sensor<? super E>> sensors = Maps.newLinkedHashMap();
+     private final Map<Integer, Map<Activity, Set<BehaviorControl<? super E>>>> availableBehaviorsByPriority = Maps.newTreeMap();
++    private @Nullable BehaviorLayout<E> behaviorLayout;
+     private @Nullable EnvironmentAttribute<Activity> schedule;
+     private final Map<Activity, Set<Pair<MemoryModuleType<?>, MemoryStatus>>> activityRequirements = Maps.newHashMap();
+     private final Map<Activity, Set<MemoryModuleType<?>>> activityMemoriesToEraseWhenStopped = Maps.newHashMap();
+@@ -75,6 +_,9 @@
+         final MemoryMap memories,
+         final RandomSource randomSource
+     ) {
++        // A new brain is not published yet: gather registrations and publish its cell index
++        // once, rather than cloning every registry array for each required memory.
++        this.registrationBuffer = new java.util.HashMap<>();
+         for (MemoryModuleType<?> memoryType : memoryTypes) {
+             this.registerMemory(memoryType);
+         }
+@@ -93,6 +_,8 @@
+             this.addActivity(activity.activityType(), activity.behaviorPriorityPairs(), activity.conditions(), activity.memoriesToEraseWhenStopped());
+         }
+ 
++        this.publishMemories(this.registrationBuffer);
++        this.registrationBuffer = null;
+         for (MemoryMap.Value<?> memory : memories) {
+             this.setMemoryInternal(memory);
+         }
+@@ -102,7 +_,26 @@
+     }
+ 
+     private void registerMemory(final MemoryModuleType<?> memoryType) {
+-        this.memories.putIfAbsent(memoryType, MemorySlot.create());
++        Map<MemoryModuleType<?>, MemorySlot<?>> buffer = this.registrationBuffer;
++        if (buffer != null) {
++            buffer.computeIfAbsent(memoryType, ignored -> MemorySlot.create());
++        } else if (!this.memories.containsKey(memoryType)) {
++            Map<MemoryModuleType<?>, MemorySlot<?>> registered = new java.util.HashMap<>(this.memories);
++            registered.put(memoryType, MemorySlot.create());
++            this.publishMemories(registered);
++        }
++    }
++
++    private void publishMemories(final Map<MemoryModuleType<?>, MemorySlot<?>> registered) {
++        int size = this.memoryCells.length;
++        for (MemoryModuleType<?> type : registered.keySet()) {
++            size = Math.max(size, type.brainIndex() + 1);
++        }
++        MemorySlot<?>[] cells = new MemorySlot<?>[size];
++        registered.forEach((type, cell) -> cells[type.brainIndex()] = cell);
++        this.memories = java.util.Collections.unmodifiableMap(registered);
++        this.memoryCells = cells;
++        this.registeredMemoryCells = registered.values().toArray(MemorySlot[]::new);
+     }
+ 
+     public Brain() {
+@@ -134,10 +_,14 @@
+         return new Brain.Packed(builder.build());
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     private <T> @Nullable MemorySlot<T> getMemorySlotIfPresent(final MemoryModuleType<T> memoryType) {
+-        return (MemorySlot<T>)this.memories.get(memoryType);
++        MemorySlot<?>[] cells = this.memoryCells;
++        int index = memoryType.brainIndex();
++        return index < cells.length ? (MemorySlot<T>)cells[index] : null;
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     private <T> MemorySlot<T> getMemorySlot(final MemoryModuleType<T> memoryType) {
+         MemorySlot<T> result = this.getMemorySlotIfPresent(memoryType);
+         if (result == null) {
+@@ -147,6 +_,7 @@
+         }
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public boolean hasMemoryValue(final MemoryModuleType<?> type) {
+         return this.checkMemory(type, MemoryStatus.VALUE_PRESENT);
+     }
+@@ -155,6 +_,7 @@
+         this.memories.values().forEach(MemorySlot::clear);
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> void eraseMemory(final MemoryModuleType<U> type) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(type);
+         if (slot != null) {
+@@ -162,18 +_,22 @@
+         }
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> void setMemory(final MemoryModuleType<U> type, final @Nullable U value) {
+         this.setMemoryInternal(type, value);
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> void setMemoryWithExpiry(final MemoryModuleType<U> type, final U value, final long timeToLive) {
+         this.setMemoryInternal(type, value, timeToLive);
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> void setMemory(final MemoryModuleType<U> type, final Optional<? extends U> optionalValue) {
+         this.setMemoryInternal(type, (U)optionalValue.orElse(null));
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     private <U> void setMemoryInternal(final MemoryMap.Value<U> value) {
+         ExpirableValue<U> expirableValue = value.value();
+         if (expirableValue.timeToLive().isPresent()) {
+@@ -183,6 +_,7 @@
+         }
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     private <U> void setMemoryInternal(final MemoryModuleType<U> type, U value, final long tileToLive) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(type);
+         if (slot != null) {
+@@ -198,6 +_,7 @@
+         }
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     private <U> void setMemoryInternal(final MemoryModuleType<U> type, @Nullable U value) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(type);
+         if (slot != null) {
+@@ -213,15 +_,18 @@
+         }
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> Optional<U> getMemory(final MemoryModuleType<U> type) {
+-        return Optional.ofNullable(this.getMemorySlot(type).value());
++        return this.getMemorySlot(type).optionalValue();
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> @Nullable Optional<U> getMemoryInternal(final MemoryModuleType<U> type) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(type);
+-        return slot == null ? null : Optional.ofNullable(slot.value());
++        return slot == null ? null : slot.optionalValue();
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> long getTimeUntilExpiry(final MemoryModuleType<U> type) {
+         return this.getMemorySlot(type).timeToLive();
+     }
+@@ -234,11 +_,13 @@
+         slot.visit((MemoryModuleType)memoryModuleType, visitor);
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public <U> boolean isMemoryValue(final MemoryModuleType<U> memoryType, final U value) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(memoryType);
+         return slot != null && Objects.equals(value, slot.value());
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public boolean checkMemory(final MemoryModuleType<?> type, final MemoryStatus status) {
+         MemorySlot<?> slot = this.getMemorySlotIfPresent(type);
+         return slot != null
+@@ -268,13 +_,9 @@
+     public List<BehaviorControl<? super E>> getRunningBehaviors() {
+         List<BehaviorControl<? super E>> runningBehaviours = new ObjectArrayList<>();
+ 
+-        for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+-            for (Set<BehaviorControl<? super E>> behaviors : behavioursByActivities.values()) {
+-                for (BehaviorControl<? super E> behavior : behaviors) {
+-                    if (behavior.getStatus() == Behavior.Status.RUNNING) {
+-                        runningBehaviours.add(behavior);
+-                    }
+-                }
++        for (BehaviorControl<? super E> behavior : this.behaviorLayout().all) {
++            if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                runningBehaviours.add(behavior);
+             }
+         }
+ 
+@@ -354,6 +_,7 @@
+         final Set<Pair<MemoryModuleType<?>, MemoryStatus>> conditions,
+         final Set<MemoryModuleType<?>> memoriesToEraseWhenStopped
+     ) {
++        this.behaviorLayout = null;
+         this.activityRequirements.put(activity, conditions);
+         if (!memoriesToEraseWhenStopped.isEmpty()) {
+             this.activityMemoriesToEraseWhenStopped.put(activity, memoriesToEraseWhenStopped);
+@@ -376,6 +_,34 @@
+     @VisibleForTesting
+     public void removeAllBehaviors() {
+         this.availableBehaviorsByPriority.clear();
++        this.behaviorLayout = null;
++    }
++
++    /** Keep the configured traversal order, without rebuilding nested map/set iterators each tick. */
++    @SuppressWarnings("unchecked")
++    private BehaviorLayout<E> behaviorLayout() {
++        BehaviorLayout<E> layout = this.behaviorLayout;
++        if (layout == null) {
++            List<BehaviorGroup<E>> groups = new ObjectArrayList<>();
++            List<BehaviorControl<? super E>> all = new ObjectArrayList<>();
++            for (Map<Activity, Set<BehaviorControl<? super E>>> byActivity : this.availableBehaviorsByPriority.values()) {
++                for (Entry<Activity, Set<BehaviorControl<? super E>>> entry : byActivity.entrySet()) {
++                    BehaviorControl<? super E>[] behaviors = entry.getValue().toArray(BehaviorControl[]::new);
++                    groups.add(new BehaviorGroup<>(entry.getKey(), behaviors));
++                    for (BehaviorControl<? super E> behavior : behaviors) {
++                        all.add(behavior);
++                    }
++                }
++            }
++            this.behaviorLayout = layout = new BehaviorLayout<>(groups.toArray(BehaviorGroup[]::new), all.toArray(BehaviorControl[]::new));
++        }
++        return layout;
++    }
++
++    private record BehaviorGroup<E extends LivingEntity>(Activity activity, BehaviorControl<? super E>[] behaviors) {
++    }
++
++    private record BehaviorLayout<E extends LivingEntity>(BehaviorGroup<E>[] groups, BehaviorControl<? super E>[] all) {
+     }
+ 
+     public boolean isActive(final Activity activity) {
+@@ -396,7 +_,9 @@
+     }
+ 
+     private void forgetOutdatedMemories() {
+-        this.memories.values().forEach(MemorySlot::tick);
++        for (MemorySlot<?> slot : this.registeredMemoryCells) {
++            slot.tick();
++        }
+     }
+ 
+     public void stopAll(final ServerLevel level, final E body) {
+@@ -410,14 +_,11 @@
+     private void startEachNonRunningBehavior(final ServerLevel level, final E body) {
+         long time = level.getGameTime();
+ 
+-        for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+-            for (Entry<Activity, Set<BehaviorControl<? super E>>> behavioursForActivity : behavioursByActivities.entrySet()) {
+-                Activity activity = behavioursForActivity.getKey();
+-                if (this.activeActivities.contains(activity)) {
+-                    for (BehaviorControl<? super E> behavior : behavioursForActivity.getValue()) {
+-                        if (behavior.getStatus() == Behavior.Status.STOPPED) {
+-                            behavior.tryStart(level, body, time);
+-                        }
++        for (BehaviorGroup<E> group : this.behaviorLayout().groups) {
++            if (this.activeActivities.contains(group.activity)) {
++                for (BehaviorControl<? super E> behavior : group.behaviors) {
++                    if (behavior.getStatus() == Behavior.Status.STOPPED) {
++                        behavior.tryStart(level, body, time);
+                     }
+                 }
+             }
+@@ -427,8 +_,24 @@
+     private void tickEachRunningBehavior(final ServerLevel level, final E body) {
+         long timestamp = level.getGameTime();
+ 
+-        for (BehaviorControl<? super E> behavior : this.getRunningBehaviors()) {
+-            behavior.tickOrStop(level, body, timestamp);
++        BehaviorControl<? super E>[] all = this.behaviorLayout().all;
++        if (this.runningScratch.length < all.length) {
++            this.runningScratch = new BehaviorControl[all.length];
++        }
++        // Snapshot membership before callbacks: one behavior can change another's status.
++        BehaviorControl<? super E>[] running = this.runningScratch;
++        int count = 0;
++        for (BehaviorControl<? super E> behavior : all) {
++            if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                running[count++] = behavior;
++            }
++        }
++        try {
++            for (int i = 0; i < count; i++) {
++                running[i].tickOrStop(level, body, timestamp);
++            }
++        } finally {
++            java.util.Arrays.fill(running, 0, count, null);
+         }
+     }
+ 

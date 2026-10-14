@@ -1,0 +1,12 @@
+--- a/net/minecraft/world/RandomSequences.java
++++ b/net/minecraft/world/RandomSequences.java
+@@ -30,7 +_,8 @@
+     private int salt;
+     private boolean includeWorldSeed = true;
+     private boolean includeSequenceId = true;
+-    private final Map<Identifier, RandomSequence> sequences = new Object2ObjectOpenHashMap<>();
++    // Loot tables on world workers create sequences on first use.
++    private final Map<Identifier, RandomSequence> sequences = new java.util.concurrent.ConcurrentHashMap<>();
+ 
+     public RandomSequences() {
+     }

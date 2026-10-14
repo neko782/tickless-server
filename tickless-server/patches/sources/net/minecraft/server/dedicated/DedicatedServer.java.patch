@@ -1,0 +1,21 @@
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -21,7 +_,6 @@
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.Optional;
+-import java.util.function.BooleanSupplier;
+ import java.util.stream.Stream;
+ import net.minecraft.DefaultUncaughtExceptionHandler;
+ import net.minecraft.DefaultUncaughtExceptionHandlerWithName;
+@@ -298,8 +_,8 @@
+     }
+ 
+     @Override
+-    protected void tickServer(final BooleanSupplier haveTime) {
+-        super.tickServer(haveTime);
++    protected void processNetwork() {
++        super.processNetwork();
+         if (this.jsonRpcServer != null) {
+             this.jsonRpcServer.tick();
+         }

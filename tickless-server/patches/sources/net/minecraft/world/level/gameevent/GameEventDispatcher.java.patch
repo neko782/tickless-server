@@ -1,0 +1,35 @@
+--- a/net/minecraft/world/level/gameevent/GameEventDispatcher.java
++++ b/net/minecraft/world/level/gameevent/GameEventDispatcher.java
+@@ -33,6 +_,7 @@
+             if (listener.getDeliveryMode() == GameEventListener.DeliveryMode.BY_DISTANCE) {
+                 toHandleByDistance.add(new GameEvent.ListenerInfo(gameEvent, position, context, listener, pos));
+             } else {
++                this.lockListener(listener);
+                 listener.handleGameEvent(this.level, gameEvent, context, position);
+             }
+         };
+@@ -43,7 +_,7 @@
+                 ChunkAccess chunk = this.level.getChunkSource().getChunkNow(chunkX, chunkZ);
+                 if (chunk != null) {
+                     for (int section = sectionMinY; section <= sectionMaxY; section++) {
+-                        applicable |= chunk.getListenerRegistry(section).visitInRangeListeners(gameEvent, position, context, visitListeners);
++                        applicable |= chunk.getExistingListenerRegistry(section).visitInRangeListeners(gameEvent, position, context, visitListeners);
+                     }
+                 }
+             }
+@@ -65,7 +_,15 @@
+ 
+         for (GameEvent.ListenerInfo listenerInfo : listenerInfos) {
+             GameEventListener listener = listenerInfo.recipient();
++            this.lockListener(listener);
+             listener.handleGameEvent(this.level, listenerInfo.gameEvent(), listenerInfo.context(), listenerInfo.source());
++        }
++    }
++
++    private void lockListener(final GameEventListener listener) {
++        // Block listeners such as sculk sensors update their block entity when they hear an event.
++        if (listener.getListenerSource() instanceof BlockPositionSource blockSource) {
++            this.level.worldLocks().lockBlock(blockSource.pos());
+         }
+     }
+ }

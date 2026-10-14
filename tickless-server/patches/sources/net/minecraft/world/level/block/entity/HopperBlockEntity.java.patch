@@ -1,0 +1,30 @@
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -265,6 +_,12 @@
+     }
+ 
+     public static boolean addItem(final Container container, final ItemEntity entity) {
++        // Another hopper or a player may be taking this item on another world worker.
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(entity);
++        if (entity.isRemoved()) {
++            return false;
++        }
++
+         boolean changed = false;
+         ItemStack copy = entity.getItem().copy();
+         ItemStack result = addItem(null, container, copy, null);
+@@ -392,7 +_,13 @@
+         List<Entity> entities = level.getEntities(
+             (Entity)null, new AABB(x - 0.5, y - 0.5, z - 0.5, x + 0.5, y + 0.5, z + 0.5), EntitySelector.CONTAINER_ENTITY_SELECTOR
+         );
+-        return !entities.isEmpty() ? (Container)entities.get(level.getRandom().nextInt(entities.size())) : null;
++        if (entities.isEmpty()) {
++            return null;
++        }
++
++        Entity container = entities.get(level.getRandom().nextInt(entities.size()));
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(container);
++        return container.isRemoved() ? null : (Container)container;
+     }
+ 
+     private static boolean canMergeItems(final ItemStack a, final ItemStack b) {

@@ -1,0 +1,15 @@
+--- a/net/minecraft/world/level/biome/Biome.java
++++ b/net/minecraft/world/level/biome/Biome.java
+@@ -122,6 +_,12 @@
+ 
+     @Deprecated
+     private float getTemperature(final BlockPos pos, final int seaLevel) {
++        if (Thread.currentThread().isVirtual()) {
++            // Every world event runs on a fresh virtual thread, so a per-thread cache would be
++            // allocated for one or two lookups. The computation is cheaper than that.
++            return this.getHeightAdjustedTemperature(pos, seaLevel);
++        }
++
+         long key = pos.asLong();
+         Long2FloatLinkedOpenHashMap cache = this.temperatureCache.get();
+         float cached = cache.get(key);

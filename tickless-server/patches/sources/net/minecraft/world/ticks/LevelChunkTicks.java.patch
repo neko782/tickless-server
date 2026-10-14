@@ -1,0 +1,121 @@
+--- a/net/minecraft/world/ticks/LevelChunkTicks.java
++++ b/net/minecraft/world/ticks/LevelChunkTicks.java
+@@ -20,6 +_,7 @@
+     private @Nullable List<SavedTick<T>> pendingTicks;
+     private final Set<ScheduledTick<?>> ticksPerPosition = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
+     private @Nullable BiConsumer<LevelChunkTicks<T>, ScheduledTick<T>> onTickAdded;
++    private final Set<ScheduledTick<?>> running = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
+ 
+     public LevelChunkTicks() {
+     }
+@@ -32,15 +_,15 @@
+         }
+     }
+ 
+-    public void setOnTickAdded(final @Nullable BiConsumer<LevelChunkTicks<T>, ScheduledTick<T>> onTickAdded) {
++    public synchronized void setOnTickAdded(final @Nullable BiConsumer<LevelChunkTicks<T>, ScheduledTick<T>> onTickAdded) {
+         this.onTickAdded = onTickAdded;
+     }
+ 
+-    public @Nullable ScheduledTick<T> peek() {
++    public synchronized @Nullable ScheduledTick<T> peek() {
+         return this.tickQueue.peek();
+     }
+ 
+-    public @Nullable ScheduledTick<T> poll() {
++    public synchronized @Nullable ScheduledTick<T> poll() {
+         ScheduledTick<T> result = this.tickQueue.poll();
+         if (result != null) {
+             this.ticksPerPosition.remove(result);
+@@ -50,7 +_,7 @@
+     }
+ 
+     @Override
+-    public void schedule(final ScheduledTick<T> tick) {
++    public synchronized void schedule(final ScheduledTick<T> tick) {
+         if (this.ticksPerPosition.add(tick)) {
+             this.scheduleUnchecked(tick);
+         }
+@@ -64,11 +_,11 @@
+     }
+ 
+     @Override
+-    public boolean hasScheduledTick(final BlockPos pos, final T type) {
++    public synchronized boolean hasScheduledTick(final BlockPos pos, final T type) {
+         return this.ticksPerPosition.contains(ScheduledTick.probe(type, pos));
+     }
+ 
+-    public void removeIf(final Predicate<ScheduledTick<T>> test) {
++    public synchronized void removeIf(final Predicate<ScheduledTick<T>> test) {
+         Iterator<ScheduledTick<T>> iterator = this.tickQueue.iterator();
+ 
+         while (iterator.hasNext()) {
+@@ -80,17 +_,55 @@
+         }
+     }
+ 
+-    public Stream<ScheduledTick<T>> getAll() {
+-        return this.tickQueue.stream();
++    public synchronized Stream<ScheduledTick<T>> getAll() {
++        return new ArrayList<>(this.tickQueue).stream();
++    }
++
++    /**
++     * Removes every tick due at or before {@code currentTick}, in drain order, and records them
++     * as running so {@link #willTickThisTick} matches vanilla while they run.
++     */
++    public synchronized List<ScheduledTick<T>> pollDue(final long currentTick, final int limit) {
++        if (limit <= 0) {
++            return List.of();
++        }
++
++        List<ScheduledTick<T>> due = null;
++        ScheduledTick<T> next;
++        while ((next = this.tickQueue.peek()) != null && next.triggerTick() <= currentTick && (due == null || due.size() < limit)) {
++            this.tickQueue.poll();
++            this.ticksPerPosition.remove(next);
++            if (due == null) {
++                due = new ArrayList<>();
++            }
++
++            due.add(next);
++            this.running.add(next);
++        }
++
++        return due == null ? List.of() : due;
++    }
++
++    public synchronized void finishedRunning(final ScheduledTick<T> tick) {
++        this.running.remove(tick);
++    }
++
++    public synchronized boolean willTickThisTick(final BlockPos pos, final T type) {
++        return !this.running.isEmpty() && this.running.contains(ScheduledTick.probe(type, pos));
++    }
++
++    public synchronized boolean hasDueTick(final long currentTick) {
++        ScheduledTick<T> next = this.tickQueue.peek();
++        return next != null && next.triggerTick() <= currentTick;
+     }
+ 
+     @Override
+-    public int count() {
++    public synchronized int count() {
+         return this.tickQueue.size() + (this.pendingTicks != null ? this.pendingTicks.size() : 0);
+     }
+ 
+     @Override
+-    public List<SavedTick<T>> pack(final long currentTick) {
++    public synchronized List<SavedTick<T>> pack(final long currentTick) {
+         List<SavedTick<T>> ticks = new ArrayList<>(this.tickQueue.size());
+         if (this.pendingTicks != null) {
+             ticks.addAll(this.pendingTicks);
+@@ -106,7 +_,7 @@
+         return ticks;
+     }
+ 
+-    public void unpack(final long currentTick) {
++    public synchronized void unpack(final long currentTick) {
+         if (this.pendingTicks != null) {
+             int subTickBase = -this.pendingTicks.size();
+ 

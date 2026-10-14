@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/entity/vehicle/boat/AbstractBoat.java
++++ b/net/minecraft/world/entity/vehicle/boat/AbstractBoat.java
+@@ -296,7 +_,7 @@
+                         && !entity.is(EntityTypeTags.CANNOT_BE_PUSHED_ONTO_BOATS)) {
+                         entity.startRiding(this);
+                     } else {
+-                        this.push(entity);
++                        net.minecraft.world.level.parallel.WorldOwnership.racy(() -> this.push(entity));
+                     }
+                 }
+             }

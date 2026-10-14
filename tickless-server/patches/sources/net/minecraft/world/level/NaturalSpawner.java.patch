@@ -1,0 +1,35 @@
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -482,7 +_,7 @@
+             this.unmodifiableMobCategoryCounts = Object2IntMaps.unmodifiable(mobCategoryCounts);
+         }
+ 
+-        private boolean canSpawn(final EntityType<?> type, final Level level, final BlockPos testPos, final ChunkAccess chunk) {
++        private synchronized boolean canSpawn(final EntityType<?> type, final Level level, final BlockPos testPos, final ChunkAccess chunk) {
+             this.lastCheckedPos = testPos;
+             this.lastCheckedType = type;
+             MobSpawnSettings naturalMobSpawns = level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, testPos);
+@@ -498,7 +_,7 @@
+             }
+         }
+ 
+-        private void afterSpawn(final Mob mob, final ChunkAccess chunk) {
++        private synchronized void afterSpawn(final Mob mob, final ChunkAccess chunk) {
+             EntityType<?> type = mob.getType();
+             BlockPos pos = mob.blockPosition();
+             double charge;
+@@ -528,12 +_,12 @@
+             return this.unmodifiableMobCategoryCounts;
+         }
+ 
+-        private boolean canSpawnForCategoryGlobal(final MobCategory mobCategory) {
++        private synchronized boolean canSpawnForCategoryGlobal(final MobCategory mobCategory) {
+             int maxMobCount = mobCategory.getMaxInstancesPerChunk() * this.spawnableChunkCount / NaturalSpawner.MAGIC_NUMBER;
+             return this.mobCategoryCounts.getInt(mobCategory) < maxMobCount;
+         }
+ 
+-        private boolean canSpawnForCategoryLocal(final MobCategory mobCategory, final ChunkPos chunkPos) {
++        private synchronized boolean canSpawnForCategoryLocal(final MobCategory mobCategory, final ChunkPos chunkPos) {
+             return this.localMobCapCalculator.canSpawn(mobCategory, chunkPos) || SharedConstants.DEBUG_IGNORE_LOCAL_MOB_CAP;
+         }
+     }

@@ -1,0 +1,76 @@
+--- a/net/minecraft/server/level/ServerEntity.java
++++ b/net/minecraft/server/level/ServerEntity.java
+@@ -76,6 +_,7 @@
+     private boolean wasRiding;
+     private boolean wasOnGround;
+     private @Nullable List<SynchedEntityData.DataValue<?>> trackedDataValues;
++    private boolean trackingSuspended = true;
+ 
+     public ServerEntity(
+         final ServerLevel level,
+@@ -101,6 +_,22 @@
+ 
+     public void sendChanges() {
+         this.entity.updateDataBeforeSync();
++        if (!this.synchronizer.hasTrackingPlayers() && !(this.entity instanceof ServerPlayer) && !(this.entity instanceof ItemFrame)) {
++            // Gameplay effects still update above. Packet preparation has no recipients; resume
++            // from live state when the next player pairs, rather than constructing discarded packets.
++            this.interpolationTracker.updateTracking(this.entity.trackingPosition());
++            this.interpolationTracker.clear();
++            if (this.entity instanceof AbstractMinecart minecart && minecart.getBehavior() instanceof NewMinecartBehavior behavior) {
++                behavior.lerpSteps.clear();
++            }
++            this.entity.syncPosition = false;
++            this.entity.needsSync = false;
++            this.entity.syncVelocity = false;
++            this.trackingSuspended = true;
++            this.tickCount++;
++            return;
++        }
++        this.resumeTracking();
+         List<Entity> passengers = this.entity.getPassengers();
+         if (!passengers.equals(this.lastPassengers)) {
+             this.synchronizer.sendToTrackingPlayers(new ClientboundSetPassengersPacket(this.entity));
+@@ -308,6 +_,7 @@
+ 
+     public void sendPairingData(final ServerPlayer player, final Consumer<Packet<ClientGamePacketListener>> broadcast) {
+         this.entity.updateDataBeforeSync();
++        this.resumeTracking();
+         if (this.entity.isRemoved()) {
+             LOGGER.warn("Fetching packet for removed entity {}", this.entity);
+         }
+@@ -353,6 +_,23 @@
+         }
+     }
+ 
++    private void resumeTracking() {
++        if (this.trackingSuspended) {
++            this.positionCodec.setBase(this.entity.trackingPosition());
++            this.lastSentMovement = this.entity.getDeltaMovement();
++            this.lastSentYRot = Mth.packDegrees(this.entity.getYRot());
++            this.lastSentXRot = Mth.packDegrees(this.entity.getXRot());
++            this.lastSentYHeadRot = Mth.packDegrees(this.entity.getYHeadRot());
++            this.wasOnGround = this.entity.onGround();
++            this.wasRiding = this.entity.isPassenger();
++            this.lastPassengers = this.entity.getPassengers();
++            this.teleportDelay = 0;
++            this.interpolationTracker.clear();
++            this.trackedDataValues = this.entity.getEntityData().getNonDefaultValues();
++            this.trackingSuspended = false;
++        }
++    }
++
+     public Vec3 getPositionBase() {
+         return this.positionCodec.getBase();
+     }
+@@ -392,6 +_,10 @@
+     }
+ 
+     public interface Synchronizer {
++        default boolean hasTrackingPlayers() {
++            return true;
++        }
++
+         void sendToTrackingPlayers(Packet<? super ClientGamePacketListener> packet);
+ 
+         void sendToTrackingPlayersAndSelf(Packet<? super ClientGamePacketListener> packet);

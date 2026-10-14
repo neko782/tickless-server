@@ -1,0 +1,97 @@
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 8641db4..68d21b9 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -653,6 +653,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         long skippedChunkSteps = 0L;
+         long entityRequests = 0L;
+         long skippedEntitySteps = 0L;
++        long completedEntitySteps = 0L;
+         int entities = 0;
+         int loadedChunks = 0;
+ 
+@@ -664,6 +665,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             entityRequests += scheduler.entityRequests.sum();
+             skippedEntitySteps += scheduler.skippedEntitySteps.sum();
+             entities += scheduler.tickingEntityCount();
++            completedEntitySteps += scheduler.completedEntitySteps.sum();
+         }
+ 
+         // This runs on the server thread, so its CPU time is the current thread's.
+@@ -675,7 +677,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         double chunkRate = chunkDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedChunkSteps - this.lastSkippedChunkSteps) / chunkDelta);
+         double entityRate = entityDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedEntitySteps - this.lastSkippedEntitySteps) / entityDelta);
+         LOGGER.info(
+-            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}",
++            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}",
+             String.format(java.util.Locale.ROOT, "%.0f", (events - this.lastStatsEvents) / seconds),
+             String.format(java.util.Locale.ROOT, "%.2f", chunkRate),
+             String.format(java.util.Locale.ROOT, "%.2f", entityRate),
+@@ -685,7 +687,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             loadedChunks,
+             WorldTxn.ABORTS.sum(),
+             WorldTxn.WOUNDS.sum(),
+-            this.worldWorkers.failures.sum()
++            this.worldWorkers.failures.sum(),
++            completedEntitySteps
+         );
+         this.lastStatsEvents = events;
+         this.lastStatsSimulationSteps = this.tickCount;
+diff --git a/src/main/java/net/minecraft/server/level/LevelEventScheduler.java b/src/main/java/net/minecraft/server/level/LevelEventScheduler.java
+index 9e84371..9b8d867 100644
+--- a/src/main/java/net/minecraft/server/level/LevelEventScheduler.java
++++ b/src/main/java/net/minecraft/server/level/LevelEventScheduler.java
+@@ -71,6 +71,8 @@ public final class LevelEventScheduler {
+     public final LongAdder chunkRuns = new LongAdder();
+     public final LongAdder chunkRequests = new LongAdder();
+     public final LongAdder entityRequests = new LongAdder();
++    /** Successfully committed non-player entity steps, independent of timer requests. */
++    public final LongAdder completedEntitySteps = new LongAdder();
+     public final LongAdder skippedChunkSteps = new LongAdder();
+     public final LongAdder skippedEntitySteps = new LongAdder();
+ 
+@@ -641,8 +648,9 @@ public final class LevelEventScheduler {
+ 
+     private void runEntity(final Entity entity) {
+         try {
++            int before = entity.tickCount;
+             BlockPos pos = entity.blockPosition();
+-            this.workers.runEvent(pos.getX(), pos.getY(), pos.getZ(), true, () -> {
++            if (this.workers.tryRunEvent(pos.getX(), pos.getY(), pos.getZ(), true, () -> {
+                 WorldTxn txn = WorldTxn.current();
+                 if (txn != null) {
+                     txn.disableReadLocks();
+@@ -650,7 +658,9 @@ public final class LevelEventScheduler {
+ 
+                 WorldLocks.lockEntityTree(entity);
+                 this.level.tickEntityEvent(entity);
+-            }, entity);
++            }, entity) && entity.tickCount != before) {
++                this.completedEntitySteps.increment();
++            }
+         } finally {
+             entity.worldTickQueued.set(false);
+         }
+diff --git a/src/main/java/net/minecraft/world/level/parallel/WorldWorkers.java b/src/main/java/net/minecraft/world/level/parallel/WorldWorkers.java
+index bef766b..2efe9ad 100644
+--- a/src/main/java/net/minecraft/world/level/parallel/WorldWorkers.java
++++ b/src/main/java/net/minecraft/world/level/parallel/WorldWorkers.java
+@@ -95,11 +95,18 @@ public final class WorldWorkers implements AutoCloseable {
+ 
+     /** Runs one event in its own transaction. Failures are logged so one broken block cannot stop the world. */
+     public void runEvent(final int x, final int y, final int z, final boolean hasOrigin, final Runnable event, final Object description) {
++        this.tryRunEvent(x, y, z, hasOrigin, event, description);
++    }
++
++    /** Returns true only after the event commits, so completed-step counters exclude failures. */
++    public boolean tryRunEvent(final int x, final int y, final int z, final boolean hasOrigin, final Runnable event, final Object description) {
+         try {
+             WorldTxn.run(x, y, z, hasOrigin, event);
++            return true;
+         } catch (Throwable t) {
+             this.failures.increment();
+             LOGGER.error("Exception in world event {}", description, t);
++            return false;
+         } finally {
+             this.events.increment();
+         }

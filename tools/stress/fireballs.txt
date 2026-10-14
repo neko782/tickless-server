@@ -1,0 +1,242 @@
+gamerule spawn_mobs false
+gamerule advance_time false
+forceload add -64 -64 63 63
+sleep 8
+summon minecraft:zombie -29 100 2
+summon minecraft:cow -39 100 20
+summon minecraft:cow -2 100 26
+summon minecraft:cow 16 100 -21
+summon minecraft:cow -37 100 7
+summon minecraft:pig -40 100 -18
+summon minecraft:cow 22 100 6
+summon minecraft:cow 24 100 -33
+summon minecraft:sheep 32 100 32
+summon minecraft:cow 25 100 26
+summon minecraft:pig -42 100 -20
+summon minecraft:cow 23 100 -31
+summon minecraft:zombie 5 100 -30
+summon minecraft:cow 25 100 -9
+summon minecraft:sheep -35 100 26
+summon minecraft:sheep -1 100 -36
+summon minecraft:cow 24 100 -41
+summon minecraft:sheep 15 100 39
+summon minecraft:pig -8 100 11
+summon minecraft:pig -2 100 -10
+summon minecraft:sheep -25 100 41
+summon minecraft:sheep -38 100 25
+summon minecraft:zombie 19 100 15
+summon minecraft:zombie 45 100 9
+summon minecraft:zombie 29 100 -39
+summon minecraft:cow 17 100 5
+summon minecraft:sheep 48 100 -5
+summon minecraft:sheep 14 100 5
+summon minecraft:cow 37 100 -39
+summon minecraft:zombie -5 100 40
+summon minecraft:zombie 28 100 15
+summon minecraft:pig -40 100 -37
+summon minecraft:zombie 12 100 41
+summon minecraft:cow -41 100 45
+summon minecraft:zombie 34 100 25
+summon minecraft:pig -12 100 43
+summon minecraft:pig 37 100 -4
+summon minecraft:cow 11 100 -3
+summon minecraft:sheep 30 100 -34
+summon minecraft:pig -41 100 -21
+summon minecraft:zombie -32 100 46
+summon minecraft:sheep 2 100 2
+summon minecraft:pig -38 100 -27
+summon minecraft:pig 3 100 22
+summon minecraft:zombie -31 100 7
+summon minecraft:zombie 42 100 5
+summon minecraft:zombie 39 100 0
+summon minecraft:sheep -29 100 -38
+summon minecraft:sheep -29 100 -19
+summon minecraft:sheep -47 100 14
+summon minecraft:sheep -15 100 -12
+summon minecraft:cow -30 100 5
+summon minecraft:zombie 30 100 24
+summon minecraft:zombie -32 100 40
+summon minecraft:cow 10 100 39
+summon minecraft:pig 2 100 3
+summon minecraft:pig -35 100 13
+summon minecraft:pig -41 100 -24
+summon minecraft:cow -22 100 8
+summon minecraft:sheep -34 100 -5
+summon minecraft:cow -35 100 -48
+summon minecraft:sheep 20 100 -36
+summon minecraft:zombie 30 100 -45
+summon minecraft:cow -22 100 30
+summon minecraft:pig -29 100 33
+summon minecraft:zombie -4 100 29
+summon minecraft:zombie 12 100 -33
+summon minecraft:cow 14 100 11
+summon minecraft:pig 13 100 -9
+summon minecraft:cow -30 100 -35
+summon minecraft:zombie 46 100 -15
+summon minecraft:pig 40 100 -28
+summon minecraft:cow -22 100 19
+summon minecraft:zombie -30 100 40
+summon minecraft:cow 19 100 -10
+summon minecraft:cow 41 100 -15
+summon minecraft:zombie -27 100 -3
+summon minecraft:sheep 20 100 21
+summon minecraft:zombie 33 100 -20
+summon minecraft:sheep -18 100 3
+summon minecraft:sheep -23 100 18
+summon minecraft:pig -3 100 45
+summon minecraft:cow -45 100 -13
+summon minecraft:pig -15 100 -24
+summon minecraft:zombie 9 100 44
+summon minecraft:zombie -2 100 -38
+summon minecraft:sheep -35 100 -19
+summon minecraft:pig -23 100 -5
+summon minecraft:sheep 13 100 31
+summon minecraft:cow 13 100 35
+summon minecraft:zombie 34 100 -38
+summon minecraft:cow 1 100 43
+summon minecraft:sheep 13 100 -26
+summon minecraft:pig 33 100 -6
+summon minecraft:cow 44 100 2
+summon minecraft:pig 3 100 47
+summon minecraft:cow 44 100 -28
+summon minecraft:sheep -32 100 -45
+summon minecraft:sheep 27 100 11
+summon minecraft:sheep 30 100 28
+summon minecraft:pig 36 100 -4
+summon minecraft:sheep 22 100 22
+summon minecraft:sheep -46 100 -47
+summon minecraft:cow 19 100 47
+summon minecraft:sheep 7 100 -24
+summon minecraft:sheep -45 100 -16
+summon minecraft:sheep -11 100 16
+summon minecraft:sheep 27 100 -7
+summon minecraft:zombie 21 100 5
+summon minecraft:sheep -41 100 46
+summon minecraft:zombie 10 100 36
+summon minecraft:pig 16 100 -32
+summon minecraft:sheep 19 100 17
+summon minecraft:cow 8 100 -25
+summon minecraft:cow -29 100 -26
+summon minecraft:sheep 12 100 31
+summon minecraft:cow 23 100 -41
+summon minecraft:zombie 39 100 18
+summon minecraft:pig -35 100 23
+summon minecraft:cow -17 100 -24
+summon minecraft:zombie -43 100 -36
+summon minecraft:pig 23 100 -45
+summon minecraft:cow 8 100 -7
+summon minecraft:sheep 40 100 -13
+summon minecraft:pig 17 100 20
+summon minecraft:pig 16 100 -17
+summon minecraft:zombie 23 100 -23
+summon minecraft:pig -31 100 5
+summon minecraft:cow 2 100 8
+summon minecraft:zombie -39 100 37
+summon minecraft:sheep 6 100 -39
+summon minecraft:sheep 37 100 -10
+summon minecraft:cow -29 100 43
+summon minecraft:zombie -30 100 -16
+summon minecraft:sheep 11 100 -20
+summon minecraft:cow 2 100 14
+summon minecraft:sheep 37 100 -20
+summon minecraft:sheep 42 100 7
+summon minecraft:pig -5 100 5
+summon minecraft:sheep -3 100 -8
+summon minecraft:cow 44 100 -2
+summon minecraft:cow -5 100 22
+summon minecraft:pig 8 100 42
+summon minecraft:cow 1 100 -6
+summon minecraft:zombie 17 100 -40
+summon minecraft:cow -19 100 -35
+summon minecraft:cow -15 100 -14
+summon minecraft:cow -25 100 -14
+summon minecraft:sheep 6 100 38
+summon minecraft:zombie 3 100 -29
+sleep 3
+summon minecraft:fireball 12 130 9 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.07d,-1.0d,0.20d]}
+summon minecraft:fireball -45 130 -21 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.44d,-1.0d,0.19d]}
+summon minecraft:fireball -2 130 -47 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.23d,-1.0d,-0.48d]}
+summon minecraft:fireball -45 130 46 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.24d,-1.0d,0.11d]}
+summon minecraft:fireball -28 130 -48 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.24d,-1.0d,-0.38d]}
+summon minecraft:fireball -55 130 -13 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.49d,-1.0d,-0.08d]}
+summon minecraft:fireball -22 130 23 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.37d,-1.0d,0.03d]}
+summon minecraft:fireball -26 130 -42 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.47d,-1.0d,-0.24d]}
+summon minecraft:fireball -33 130 -31 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.43d,-1.0d,0.13d]}
+summon minecraft:fireball 11 130 41 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.29d,-1.0d,-0.05d]}
+summon minecraft:fireball 30 130 -34 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.23d,-1.0d,0.30d]}
+summon minecraft:fireball -24 130 -52 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.48d,-1.0d,0.23d]}
+forceload remove 0 0 63 63
+sleep 3
+summon minecraft:fireball 14 130 -32 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.01d,-1.0d,-0.25d]}
+summon minecraft:fireball 1 130 -43 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.16d,-1.0d,0.15d]}
+summon minecraft:fireball 28 130 7 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.05d,-1.0d,0.39d]}
+summon minecraft:fireball 8 130 -17 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.19d,-1.0d,0.48d]}
+summon minecraft:fireball -13 130 -31 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.33d,-1.0d,0.21d]}
+summon minecraft:fireball 25 130 -39 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.10d,-1.0d,-0.15d]}
+summon minecraft:fireball -50 130 51 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.37d,-1.0d,-0.43d]}
+summon minecraft:fireball 38 130 56 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.24d,-1.0d,-0.34d]}
+summon minecraft:fireball -46 130 29 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.34d,-1.0d,0.37d]}
+summon minecraft:fireball 29 130 -20 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.10d,-1.0d,0.19d]}
+summon minecraft:fireball -51 130 2 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.31d,-1.0d,-0.23d]}
+summon minecraft:fireball -56 130 -23 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.14d,-1.0d,-0.17d]}
+forceload add 0 0 63 63
+sleep 3
+summon minecraft:fireball 14 130 -15 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.26d,-1.0d,0.47d]}
+summon minecraft:fireball -17 130 -29 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.14d,-1.0d,-0.50d]}
+summon minecraft:fireball -8 130 -46 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.03d,-1.0d,0.00d]}
+summon minecraft:fireball -31 130 -25 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.00d,-1.0d,-0.50d]}
+summon minecraft:fireball -23 130 48 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.41d,-1.0d,-0.10d]}
+summon minecraft:fireball -51 130 -6 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.48d,-1.0d,-0.20d]}
+summon minecraft:fireball -27 130 -46 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.09d,-1.0d,0.03d]}
+summon minecraft:fireball 40 130 -37 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.16d,-1.0d,0.22d]}
+summon minecraft:fireball 56 130 20 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.11d,-1.0d,-0.17d]}
+summon minecraft:fireball 7 130 -37 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.22d,-1.0d,0.12d]}
+summon minecraft:fireball -38 130 -51 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.32d,-1.0d,0.22d]}
+summon minecraft:fireball 9 130 24 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.07d,-1.0d,0.20d]}
+forceload remove 0 0 63 63
+sleep 3
+summon minecraft:fireball 8 130 -39 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.41d,-1.0d,0.25d]}
+summon minecraft:fireball 16 130 50 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.31d,-1.0d,-0.48d]}
+summon minecraft:fireball 31 130 18 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.30d,-1.0d,0.21d]}
+summon minecraft:fireball 32 130 26 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.27d,-1.0d,-0.47d]}
+summon minecraft:fireball -39 130 25 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.14d,-1.0d,-0.40d]}
+summon minecraft:fireball 50 130 1 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.06d,-1.0d,0.13d]}
+summon minecraft:fireball 24 130 12 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.18d,-1.0d,-0.01d]}
+summon minecraft:fireball -56 130 2 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.30d,-1.0d,0.25d]}
+summon minecraft:fireball 8 130 12 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.41d,-1.0d,0.03d]}
+summon minecraft:fireball 39 130 38 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.03d,-1.0d,0.31d]}
+summon minecraft:fireball 52 130 -23 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.27d,-1.0d,0.26d]}
+summon minecraft:fireball -27 130 38 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.15d,-1.0d,-0.04d]}
+forceload add 0 0 63 63
+sleep 3
+summon minecraft:fireball 52 130 -8 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.42d,-1.0d,0.41d]}
+summon minecraft:fireball -20 130 42 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.45d,-1.0d,0.13d]}
+summon minecraft:fireball -31 130 -47 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.10d,-1.0d,-0.17d]}
+summon minecraft:fireball 27 130 39 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.19d,-1.0d,0.12d]}
+summon minecraft:fireball -39 130 -55 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.02d,-1.0d,-0.01d]}
+summon minecraft:fireball 30 130 -44 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.19d,-1.0d,0.18d]}
+summon minecraft:fireball -19 130 34 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.02d,-1.0d,-0.04d]}
+summon minecraft:fireball 3 130 42 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.38d,-1.0d,0.39d]}
+summon minecraft:fireball -31 130 -17 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.48d,-1.0d,0.44d]}
+summon minecraft:fireball -54 130 -19 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.04d,-1.0d,0.32d]}
+summon minecraft:fireball 1 130 -22 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.11d,-1.0d,0.42d]}
+summon minecraft:fireball -30 130 -47 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.08d,-1.0d,-0.36d]}
+forceload remove 0 0 63 63
+sleep 3
+summon minecraft:fireball 11 130 -23 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.45d,-1.0d,-0.37d]}
+summon minecraft:fireball 48 130 24 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.01d,-1.0d,0.39d]}
+summon minecraft:fireball 34 130 -10 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.27d,-1.0d,0.40d]}
+summon minecraft:fireball 6 130 -6 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.48d,-1.0d,-0.50d]}
+summon minecraft:fireball 6 130 31 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.05d,-1.0d,-0.20d]}
+summon minecraft:fireball -38 130 -3 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.16d,-1.0d,-0.18d]}
+summon minecraft:fireball 51 130 -14 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.50d,-1.0d,0.25d]}
+summon minecraft:fireball 51 130 -6 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.38d,-1.0d,0.43d]}
+summon minecraft:fireball 35 130 -55 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[0.40d,-1.0d,-0.21d]}
+summon minecraft:fireball -9 130 -48 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.11d,-1.0d,0.50d]}
+summon minecraft:fireball 19 130 -47 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.14d,-1.0d,-0.07d]}
+summon minecraft:fireball -21 130 53 {ExplosionPower:40b,acceleration_power:0.1d,Motion:[-0.45d,-1.0d,-0.40d]}
+forceload add 0 0 63 63
+sleep 3
+forceload remove all
+sleep 6
+say fireballs done

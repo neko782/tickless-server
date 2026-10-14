@@ -1,0 +1,210 @@
+--- a/net/minecraft/world/level/chunk/PalettedContainer.java
++++ b/net/minecraft/world/level/chunk/PalettedContainer.java
+@@ -7,6 +_,8 @@
+ import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
+ import it.unimi.dsi.fastutil.ints.IntArraySet;
+ import it.unimi.dsi.fastutil.ints.IntSet;
++import java.lang.invoke.MethodHandles;
++import java.lang.invoke.VarHandle;
+ import java.util.Arrays;
+ import java.util.List;
+ import java.util.Optional;
+@@ -18,22 +_,56 @@
+ import net.minecraft.util.BitStorage;
+ import net.minecraft.util.ExtraCodecs;
+ import net.minecraft.util.SimpleBitStorage;
+-import net.minecraft.util.ThreadingDetector;
+ import net.minecraft.util.ZeroBitStorage;
+ import org.jspecify.annotations.Nullable;
+ 
+ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainerRO<T> {
+     private static final int MIN_PALETTE_BITS = 0;
++    private static final VarHandle SEQ;
+     private volatile PalettedContainer.Data<T> data;
+     private final Strategy<T> strategy;
+-    private final ThreadingDetector threadingDetector = new ThreadingDetector("PalettedContainer");
+-
++    // Sequence lock: odd while a writer is active. Readers retry instead of blocking.
++    private volatile int seq;
++    private @Nullable Thread writer;
++    private int writerDepth;
++
++    static {
++        try {
++            SEQ = MethodHandles.lookup().findVarHandle(PalettedContainer.class, "seq", int.class);
++        } catch (ReflectiveOperationException e) {
++            throw new ExceptionInInitializerError(e);
++        }
++    }
++
++    /** Takes the write latch. Reentrant for the owning thread. */
+     public void acquire() {
+-        this.threadingDetector.checkAndLock();
++        Thread current = Thread.currentThread();
++        if (this.writer == current) {
++            this.writerDepth++;
++            return;
++        }
++
++        for (int spins = 0; ; spins++) {
++            int s = this.seq;
++            if ((s & 1) == 0 && SEQ.compareAndSet(this, s, s + 1)) {
++                this.writer = current;
++                this.writerDepth = 1;
++                return;
++            }
++
++            if (spins < 256) {
++                Thread.onSpinWait();
++            } else {
++                Thread.yield();
++            }
++        }
+     }
+ 
+     public void release() {
+-        this.threadingDetector.checkAndUnlock();
++        if (--this.writerDepth == 0) {
++            this.writer = null;
++            this.seq = this.seq + 1;
++        }
+     }
+ 
+     public static <T> Codec<PalettedContainer<T>> codecRW(final Codec<T> elementCodec, final Strategy<T> strategy, final T defaultValue) {
+@@ -71,7 +_,13 @@
+ 
+     private PalettedContainer(final PalettedContainer<T> source) {
+         this.strategy = source.strategy;
+-        this.data = source.data.copy();
++        source.acquire();
++
++        try {
++            this.data = source.data.copy();
++        } finally {
++            source.release();
++        }
+     }
+ 
+     public PalettedContainer(final T initialValue, final Strategy<T> strategy) {
+@@ -113,7 +_,13 @@
+     }
+ 
+     public T getAndSetUnchecked(final int x, final int y, final int z, final T value) {
+-        return this.getAndSet(this.strategy.getIndex(x, y, z), value);
++        this.acquire();
++
++        try {
++            return this.getAndSet(this.strategy.getIndex(x, y, z), value);
++        } finally {
++            this.release();
++        }
+     }
+ 
+     private T getAndSet(final int index, final T value) {
+@@ -143,15 +_,47 @@
+     }
+ 
+     protected T get(final int index) {
+-        PalettedContainer.Data<T> data = this.data;
+-        return data.palette.valueFor(data.storage.get(index));
++        // Readers only retry and never take the write latch: a reader holding the latch would
++        // make every other reader of this section fail and queue behind it too.
++        for (int spins = 0; ; spins++) {
++            int s = this.seq;
++            if ((s & 1) == 0) {
++                try {
++                    PalettedContainer.Data<T> data = this.data;
++                    T value = data.palette.valueFor(data.storage.get(index));
++                    VarHandle.acquireFence();
++                    if (value != null && this.seq == s) {
++                        return value;
++                    }
++                } catch (RuntimeException ignored) {
++                    // A concurrent resize can pair new storage with an old palette. Retry.
++                }
++            } else if (this.writer == Thread.currentThread()) {
++                PalettedContainer.Data<T> data = this.data;
++                return data.palette.valueFor(data.storage.get(index));
++            }
++
++            if (spins < 256) {
++                Thread.onSpinWait();
++            } else {
++                Thread.yield();
++            }
++        }
+     }
+ 
+     @Override
+     public void getAll(final Consumer<T> consumer) {
+-        Palette<T> palette = this.data.palette();
+         IntSet allExistingEntries = new IntArraySet();
+-        this.data.storage.getAll(allExistingEntries::add);
++        Palette<T> palette;
++        this.acquire();
++
++        try {
++            palette = this.data.palette();
++            this.data.storage.getAll(allExistingEntries::add);
++        } finally {
++            this.release();
++        }
++
+         allExistingEntries.forEach(state -> consumer.accept(palette.valueFor(state)));
+     }
+ 
+@@ -271,7 +_,13 @@
+ 
+     @Override
+     public int getSerializedSize() {
+-        return this.data.getSerializedSize(this.strategy.globalMap());
++        this.acquire();
++
++        try {
++            return this.data.getSerializedSize(this.strategy.globalMap());
++        } finally {
++            this.release();
++        }
+     }
+ 
+     @Override
+@@ -286,8 +_,12 @@
+ 
+     @Override
+     public void forEachInPalette(final Consumer<T> consumer) {
+-        for (int i = 0; i < this.data.palette.getSize(); i++) {
+-            consumer.accept(this.data.palette.valueFor(i));
++        Palette<T> palette = this.data.palette;
++        for (int i = 0; i < palette.getSize(); i++) {
++            T value = palette.valueFor(i);
++            if (value != null) {
++                consumer.accept(value);
++            }
+         }
+     }
+ 
+@@ -303,12 +_,18 @@
+ 
+     @Override
+     public void count(final PalettedContainer.CountConsumer<T> output) {
+-        if (this.data.palette.getSize() == 1) {
+-            output.accept(this.data.palette.valueFor(0), this.data.storage.getSize());
+-        } else {
+-            Int2IntOpenHashMap counts = new Int2IntOpenHashMap();
+-            this.data.storage.getAll(state -> counts.addTo(state, 1));
+-            counts.int2IntEntrySet().forEach(entry -> output.accept(this.data.palette.valueFor(entry.getIntKey()), entry.getIntValue()));
++        this.acquire();
++
++        try {
++            if (this.data.palette.getSize() == 1) {
++                output.accept(this.data.palette.valueFor(0), this.data.storage.getSize());
++            } else {
++                Int2IntOpenHashMap counts = new Int2IntOpenHashMap();
++                this.data.storage.getAll(state -> counts.addTo(state, 1));
++                counts.int2IntEntrySet().forEach(entry -> output.accept(this.data.palette.valueFor(entry.getIntKey()), entry.getIntValue()));
++            }
++        } finally {
++            this.release();
+         }
+     }
+ 

@@ -1,0 +1,40 @@
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -40,7 +_,8 @@
+ 
+ public class SavedDataStorage implements AutoCloseable {
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Map<SavedDataType<?>, Optional<SavedData>> cache = new HashMap<>();
++    // World workers look up saved data (raids, maps) while the server thread saves it.
++    private final Map<SavedDataType<?>, Optional<SavedData>> cache = new java.util.concurrent.ConcurrentHashMap<>();
+     private final DataFixer fixerUpper;
+     private final HolderLookup.Provider registries;
+     private final Path dataFolder;
+@@ -68,16 +_,23 @@
+             return data;
+         }
+ 
++        // Two world workers may create the same data at once; both must end up with one instance.
+         T newData = (T)type.constructor().get();
+-        this.set(type, newData);
+-        return newData;
++        Optional<SavedData> fresh = Optional.of(newData);
++        Optional<SavedData> existing = this.cache.compute(type, (k, current) -> current == null || current.isEmpty() ? fresh : current);
++        if (existing == fresh) {
++            newData.setDirty();
++        }
++
++        return (T)existing.get();
+     }
+ 
+     public <T extends SavedData> @Nullable T get(final SavedDataType<T> type) {
+         Optional<SavedData> data = this.cache.get(type);
+         if (data == null) {
+-            data = Optional.ofNullable(this.readSavedData(type));
+-            this.cache.put(type, data);
++            Optional<SavedData> loaded = Optional.ofNullable(this.readSavedData(type));
++            Optional<SavedData> existing = this.cache.putIfAbsent(type, loaded);
++            data = existing != null ? existing : loaded;
+         }
+ 
+         return (T)data.orElse(null);

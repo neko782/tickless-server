@@ -1,0 +1,16 @@
+--- a/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java
++++ b/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java
+@@ -45,8 +_,11 @@
+             Entity var6 = hitResult.getEntity();
+             Entity owner = this.getOwner();
+             DamageSource damageSource = this.damageSources().fireball(this, owner);
+-            var6.hurtServer(serverLevel, damageSource, 6.0F);
+-            EnchantmentHelper.doPostAttackEffects(serverLevel, var6, damageSource);
++            // The hit is complete on its own; do not keep the target locked through the explosion.
++            net.minecraft.world.level.parallel.WorldTxn.scoped(() -> {
++                var6.hurtServer(serverLevel, damageSource, 6.0F);
++                EnchantmentHelper.doPostAttackEffects(serverLevel, var6, damageSource);
++            });
+         }
+     }
+ 

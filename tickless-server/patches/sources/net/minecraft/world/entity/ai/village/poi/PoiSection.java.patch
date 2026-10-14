@@ -1,0 +1,131 @@
+--- a/net/minecraft/world/entity/ai/village/poi/PoiSection.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiSection.java
+@@ -27,8 +_,12 @@
+ 
+ public class PoiSection {
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Short2ObjectMap<PoiRecord> records = new Short2ObjectOpenHashMap<>();
+-    private final Map<Holder<PoiType>, Set<PoiRecord>> byType = Maps.newHashMap();
++    // Villager AI on world workers reads sections while block changes add and remove records.
++    private final Map<Short, PoiRecord> records = new java.util.concurrent.ConcurrentHashMap<>();
++    private final Map<Holder<PoiType>, Set<PoiRecord>> byType = new java.util.concurrent.ConcurrentHashMap<>();
++    private final java.util.concurrent.atomic.AtomicLong queryVersion = new java.util.concurrent.atomic.AtomicLong();
++    private volatile @Nullable QuerySnapshot queryGroups;
++    private record QuerySnapshot(long version, TypeGroup[] groups) {}
+     private final Runnable setDirty;
+     private boolean isValid;
+ 
+@@ -47,7 +_,65 @@
+     }
+ 
+     public Stream<PoiRecord> getRecords(final Predicate<Holder<PoiType>> predicate, final PoiManager.Occupancy occupancy) {
+-        return this.byType.entrySet().stream().filter(e -> predicate.test(e.getKey())).flatMap(e -> e.getValue().stream()).filter(occupancy.getTest());
++        return query(this.queryGroups(), predicate, occupancy);
++    }
++
++    static Stream<PoiRecord> query(final TypeGroup[] groups, final Predicate<Holder<PoiType>> predicate, final PoiManager.Occupancy occupancy) {
++        if (groups.length == 0) {
++            return Stream.empty();
++        }
++        Predicate<? super PoiRecord> available = occupancy.getTest();
++        // One cursor replaces a stream/spliterator for every section, type and record set.
++        // Type predicates retain one lazy call per group; availability is never cached.
++        return java.util.stream.StreamSupport.stream(new java.util.Spliterators.AbstractSpliterator<PoiRecord>(Long.MAX_VALUE, 0) {
++            int groupIndex;
++            int recordIndex;
++            boolean testedGroup;
++            boolean acceptsGroup;
++            @Override
++            public boolean tryAdvance(final Consumer<? super PoiRecord> action) {
++                while (this.groupIndex < groups.length) {
++                    TypeGroup group = groups[this.groupIndex];
++                    if (!this.testedGroup) {
++                        this.acceptsGroup = predicate.test(group.type);
++                        this.testedGroup = true;
++                    }
++                    if (this.acceptsGroup) {
++                        while (this.recordIndex < group.records.length) {
++                            PoiRecord record = group.records[this.recordIndex++];
++                            if (available.test(record)) {
++                                action.accept(record);
++                                return true;
++                            }
++                        }
++                    }
++                    this.groupIndex++;
++                    this.recordIndex = 0;
++                    this.testedGroup = false;
++                }
++                return false;
++            }
++        }, false);
++    }
++
++    record TypeGroup(Holder<PoiType> type, PoiRecord[] records) {}
++
++    TypeGroup[] queryGroups() {
++        long version = this.queryVersion.get();
++        QuerySnapshot snapshot = this.queryGroups;
++        if (snapshot != null && snapshot.version == version) {
++            return snapshot.groups;
++        }
++        // Readers can already hold the distance-tracker monitor. Acquiring this section's
++        // monitor would invert the order used by edits, which dirty the tracker under it.
++        // Build from concurrent collections and publish a versioned immutable snapshot.
++        TypeGroup[] groups = this.byType.entrySet().stream()
++            .map(entry -> new TypeGroup(entry.getKey(), entry.getValue().toArray(PoiRecord[]::new)))
++            .toArray(TypeGroup[]::new);
++        if (this.queryVersion.get() == version) {
++            this.queryGroups = new QuerySnapshot(version, groups);
++        }
++        return groups;
+     }
+ 
+     public @Nullable PoiRecord add(final BlockPos blockPos, final Holder<PoiType> type) {
+@@ -61,7 +_,7 @@
+         }
+     }
+ 
+-    private boolean add(final PoiRecord record) {
++    private synchronized boolean add(final PoiRecord record) {
+         BlockPos blockPos = record.getPos();
+         Holder<PoiType> poiType = record.getPoiType();
+         short key = SectionPos.sectionRelativePos(blockPos);
+@@ -75,16 +_,18 @@
+         }
+ 
+         this.records.put(key, record);
+-        this.byType.computeIfAbsent(poiType, k -> Sets.newHashSet()).add(record);
++        this.byType.computeIfAbsent(poiType, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(record);
++        this.queryVersion.incrementAndGet();
+         return true;
+     }
+ 
+-    public void remove(final BlockPos pos) {
++    public synchronized void remove(final BlockPos pos) {
+         PoiRecord poiRecord = this.records.remove(SectionPos.sectionRelativePos(pos));
+         if (poiRecord == null) {
+             LOGGER.error("POI data mismatch: never registered at {}", pos);
+         } else {
+             this.byType.get(poiRecord.getPoiType()).remove(poiRecord);
++            this.queryVersion.incrementAndGet();
+             LOGGER.debug("Removed POI of type {} @ {}", LogUtils.defer(poiRecord::getPoiType), LogUtils.defer(poiRecord::getPos));
+             this.setDirty.run();
+         }
+@@ -123,7 +_,7 @@
+         return this.getPoiRecord(pos).map(DebugPoiInfo::new);
+     }
+ 
+-    public void refresh(final Consumer<BiConsumer<BlockPos, Holder<PoiType>>> updater) {
++    public synchronized void refresh(final Consumer<BiConsumer<BlockPos, Holder<PoiType>>> updater) {
+         if (!this.isValid) {
+             Short2ObjectMap<PoiRecord> oldRecords = new Short2ObjectOpenHashMap<>(this.records);
+             this.clear();
+@@ -140,6 +_,7 @@
+     private void clear() {
+         this.records.clear();
+         this.byType.clear();
++        this.queryVersion.incrementAndGet();
+     }
+ 
+     public boolean isValid() {

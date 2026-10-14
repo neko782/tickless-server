@@ -1,0 +1,206 @@
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -9,6 +_,7 @@
+ import java.util.Locale;
+ import java.util.Optional;
+ import java.util.UUID;
++import java.util.concurrent.atomic.AtomicLong;
+ import java.util.function.Consumer;
+ import java.util.function.Predicate;
+ import java.util.stream.Collectors;
+@@ -77,6 +_,9 @@
+ import net.minecraft.world.level.lighting.LevelLightEngine;
+ import net.minecraft.world.level.material.FluidState;
+ import net.minecraft.world.level.material.Fluids;
++import net.minecraft.world.level.parallel.PerThreadRandomSource;
++import net.minecraft.world.level.parallel.WorldLocks;
++import net.minecraft.world.level.parallel.WorldTxn;
+ import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
+ import net.minecraft.world.level.redstone.Orientation;
+ import net.minecraft.world.level.saveddata.maps.MapId;
+@@ -106,7 +_,10 @@
+         .add(new ExplosionParticleInfo(ParticleTypes.SMOKE, 1.0F, 1.0F))
+         .build();
+     protected final List<TickingBlockEntity> blockEntityTickers = Lists.newArrayList();
+-    protected final CollectingNeighborUpdater neighborUpdater;
++    // Neighbor updates run to completion inside the event that triggered them, so each thread
++    // needs its own queue.
++    private final ThreadLocal<CollectingNeighborUpdater> neighborUpdater;
++    private final WorldLocks worldLocks = new WorldLocks();
+     private final List<TickingBlockEntity> pendingBlockEntityTickers = Lists.newArrayList();
+     private boolean tickingBlockEntities;
+     private final Thread thread;
+@@ -118,7 +_,7 @@
+     protected float rainLevel;
+     protected float oThunderLevel;
+     protected float thunderLevel;
+-    protected final RandomSource random = RandomSource.create();
++    protected final RandomSource random = new PerThreadRandomSource();
+     @Deprecated
+     private final RandomSource soundSeedGenerator = RandomSource.createThreadSafe();
+     private final Holder<DimensionType> dimensionTypeRegistration;
+@@ -129,7 +_,7 @@
+     private final RegistryAccess registryAccess;
+     private final DamageSources damageSources;
+     private final PalettedContainerFactory palettedContainerFactory;
+-    private long subTickCount;
++    private final AtomicLong subTickCount = new AtomicLong();
+ 
+     protected Level(
+         final WritableLevelData levelData,
+@@ -148,7 +_,7 @@
+         this.thread = Thread.currentThread();
+         this.biomeManager = new BiomeManager(this, biomeZoomSeed);
+         this.isDebug = isDebug;
+-        this.neighborUpdater = new CollectingNeighborUpdater(this, maxChainedNeighborUpdates);
++        this.neighborUpdater = ThreadLocal.withInitial(() -> new CollectingNeighborUpdater(this, maxChainedNeighborUpdates));
+         this.registryAccess = registryAccess;
+         this.palettedContainerFactory = PalettedContainerFactory.create(registryAccess);
+         this.damageSources = new DamageSources(registryAccess);
+@@ -223,6 +_,7 @@
+             return false;
+         }
+ 
++        this.worldLocks.lockBlock(pos);
+         LevelChunk chunk = this.getChunkAt(pos);
+         Block block = blockState.getBlock();
+         BlockState oldState = chunk.setBlockState(pos, blockState, updateFlags);
+@@ -326,7 +_,7 @@
+         final @Block.UpdateFlags int updateFlags,
+         final int updateLimit
+     ) {
+-        this.neighborUpdater.shapeUpdate(direction, neighborState, pos, neighborPos, updateFlags, updateLimit);
++        this.neighborUpdater().shapeUpdate(direction, neighborState, pos, neighborPos, updateFlags, updateLimit);
+     }
+ 
+     @Override
+@@ -350,14 +_,36 @@
+         return this.getChunkSource().getLightEngine();
+     }
+ 
++    /** Takes the read lock for {@code pos} if the current event needs one, and returns its chunk. */
++    private LevelChunk chunkForRead(final BlockPos pos) {
++        int chunkX = SectionPos.blockToSectionCoord(pos.getX());
++        int chunkZ = SectionPos.blockToSectionCoord(pos.getZ());
++        WorldTxn txn = WorldTxn.current();
++        if (txn == null) {
++            return this.getChunk(chunkX, chunkZ);
++        }
++
++        if (txn.shouldLockRead(pos)) {
++            txn.lock(this.worldLocks.forBlock(pos.asLong()));
++        }
++
++        long key = ChunkPos.pack(chunkX, chunkZ);
++        if (txn.cachedChunk(this, key) instanceof LevelChunk cached) {
++            return cached;
++        }
++
++        LevelChunk chunk = this.getChunk(chunkX, chunkZ);
++        txn.cacheChunk(this, key, chunk);
++        return chunk;
++    }
++
+     @Override
+     public BlockState getBlockState(final BlockPos pos) {
+         if (!this.isInValidBounds(pos)) {
+             return Blocks.VOID_AIR.defaultBlockState();
+         }
+ 
+-        LevelChunk chunk = this.getChunk(SectionPos.blockToSectionCoord(pos.getX()), SectionPos.blockToSectionCoord(pos.getZ()));
+-        return chunk.getBlockState(pos);
++        return this.chunkForRead(pos).getBlockState(pos);
+     }
+ 
+     @Override
+@@ -366,8 +_,7 @@
+             return Fluids.EMPTY.defaultFluidState();
+         }
+ 
+-        LevelChunk chunk = this.getChunkAt(pos);
+-        return chunk.getFluidState(pos);
++        return this.chunkForRead(pos).getFluidState(pos);
+     }
+ 
+     public boolean isBrightOutside() {
+@@ -697,22 +_,25 @@
+     public @Nullable BlockEntity getBlockEntity(final BlockPos pos) {
+         if (!this.isInValidBounds(pos)) {
+             return null;
++        } else if (!this.isClientSide() && Thread.currentThread() != this.thread && !WorldTxn.isParticipant()) {
++            return null;
+         } else {
+-            return !this.isClientSide() && Thread.currentThread() != this.thread
+-                ? null
+-                : this.getChunkAt(pos).getBlockEntity(pos, LevelChunk.EntityCreationType.IMMEDIATE);
++            this.worldLocks.lockBlock(pos);
++            return this.getChunkAt(pos).getBlockEntity(pos, LevelChunk.EntityCreationType.IMMEDIATE);
+         }
+     }
+ 
+     public void setBlockEntity(final BlockEntity blockEntity) {
+         BlockPos pos = blockEntity.getBlockPos();
+         if (this.isInValidBounds(pos)) {
++            this.worldLocks.lockBlock(pos);
+             this.getChunkAt(pos).addAndRegisterBlockEntity(blockEntity);
+         }
+     }
+ 
+     public void removeBlockEntity(final BlockPos pos) {
+         if (this.isInValidBounds(pos)) {
++            this.worldLocks.lockBlock(pos);
+             this.getChunkAt(pos).removeBlockEntity(pos);
+         }
+     }
+@@ -789,6 +_,18 @@
+     }
+ 
+     @Override
++    public List<Entity> getHardColliders(final @Nullable Entity except, final AABB bb, final Predicate<? super Entity> selector) {
++        List<Entity> output = new java.util.ArrayList<>(0);
++        // Dragon parts never override canBeCollidedWith, so unlike getEntities there is nothing to add for them.
++        this.getEntities().getHardColliders(bb, entity -> {
++            if (entity != except && selector.test(entity)) {
++                output.add(entity);
++            }
++        });
++        return output;
++    }
++
++    @Override
+     public <T extends Entity> List<T> getEntities(final EntityTypeTest<Entity, T> type, final AABB bb, final Predicate<? super T> selector) {
+         List<T> output = Lists.newArrayList();
+         this.getEntities(type, bb, selector, output);
+@@ -1013,6 +_,15 @@
+     public abstract Scoreboard getScoreboard();
+ 
+     public void updateNeighbourForOutputSignal(final BlockPos pos, final Block changedBlock) {
++        // Comparators read the changed container; do it once the event's transfer is complete.
++        BlockPos immutable = pos.immutable();
++        WorldTxn.defer(new OutputSignalKey(this, immutable.asLong()), () -> this.updateNeighbourForOutputSignalNow(immutable, changedBlock));
++    }
++
++    private record OutputSignalKey(Level level, long pos) {
++    }
++
++    private void updateNeighbourForOutputSignalNow(final BlockPos pos, final Block changedBlock) {
+         for (Direction direction : Direction.Plane.HORIZONTAL) {
+             BlockPos relativePos = pos.relative(direction);
+             if (this.hasChunkAt(relativePos)) {
+@@ -1095,7 +_,15 @@
+ 
+     @Override
+     public long nextSubTickCount() {
+-        return this.subTickCount++;
++        return this.subTickCount.getAndIncrement();
++    }
++
++    protected CollectingNeighborUpdater neighborUpdater() {
++        return this.neighborUpdater.get();
++    }
++
++    public WorldLocks worldLocks() {
++        return this.worldLocks;
+     }
+ 
+     @Override

@@ -1,0 +1,24 @@
+--- a/net/minecraft/server/commands/SaveAllCommand.java
++++ b/net/minecraft/server/commands/SaveAllCommand.java
+@@ -24,12 +_,15 @@
+     private static int saveAll(final CommandSourceStack source, final boolean flush) throws CommandSyntaxException {
+         source.sendSuccess(() -> Component.translatable("commands.save.saving"), false);
+         MinecraftServer server = source.getServer();
+-        boolean success = server.saveEverything(true, flush, true);
+-        if (!success) {
+-            throw ERROR_FAILED.create();
+-        }
+-
+-        source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
++        // Saving serializes entities and block entities, so it waits for world events to pause, as
++        // autosave does. The result is reported when the save has run.
++        net.minecraft.world.level.parallel.WorldTxn.requestExclusive(() -> {
++            if (server.saveEverything(true, flush, true)) {
++                source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
++            } else {
++                source.sendFailure(ERROR_FAILED.create().getRawMessage() instanceof Component message ? message : Component.translatable("commands.save.failed"));
++            }
++        });
+         return Command.SINGLE_SUCCESS;
+     }
+ }

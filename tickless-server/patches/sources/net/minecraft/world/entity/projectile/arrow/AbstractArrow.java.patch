@@ -1,0 +1,18 @@
+--- a/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java
++++ b/net/minecraft/world/entity/projectile/arrow/AbstractArrow.java
+@@ -1,5 +_,6 @@
+ package net.minecraft.world.entity.projectile.arrow;
+ 
++import net.minecraft.world.level.parallel.SnapshotSort;
+ import com.google.common.collect.Lists;
+ import com.mojang.serialization.Codec;
+ import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+@@ -281,7 +_,7 @@
+         while (this.isAlive()) {
+             Vec3 initialPosition = this.position();
+             ArrayList<EntityHitResult> entitiesHit = new ArrayList<>(this.findHitEntities(initialPosition, blockHitResult.getLocation()));
+-            entitiesHit.sort(Comparator.comparingDouble(c -> initialPosition.distanceToSqr(c.getEntity().position())));
++            SnapshotSort.sortByKey(entitiesHit, c -> initialPosition.distanceToSqr(c.getEntity().position()));
+             EntityHitResult firstEntityHit = entitiesHit.isEmpty() ? null : entitiesHit.getFirst();
+             Vec3 nextLocation = Objects.requireNonNullElse(firstEntityHit, blockHitResult).getLocation();
+             this.setPos(nextLocation);

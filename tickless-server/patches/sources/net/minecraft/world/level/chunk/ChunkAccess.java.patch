@@ -1,0 +1,25 @@
+--- a/net/minecraft/world/level/chunk/ChunkAccess.java
++++ b/net/minecraft/world/level/chunk/ChunkAccess.java
+@@ -73,8 +_,8 @@
+     protected ChunkSkyLightSources skyLightSources;
+     private final Map<Structure, StructureStart> structureStarts = Maps.newHashMap();
+     private final Map<Structure, LongSet> structureReferences = Maps.newHashMap();
+-    protected final Map<BlockPos, CompoundTag> pendingBlockEntities = Maps.newHashMap();
+-    protected final Map<BlockPos, BlockEntity> blockEntities = new Object2ObjectOpenHashMap<>();
++    protected final Map<BlockPos, CompoundTag> pendingBlockEntities = new java.util.concurrent.ConcurrentHashMap<>();
++    protected final Map<BlockPos, BlockEntity> blockEntities = new java.util.concurrent.ConcurrentHashMap<>();
+     protected final LevelHeightAccessor levelHeightAccessor;
+     protected final LevelChunkSection[] sections;
+ 
+@@ -116,6 +_,11 @@
+ 
+     public GameEventListenerRegistry getListenerRegistry(final int section) {
+         return GameEventListenerRegistry.NOOP;
++    }
++
++    /** The section's registry if a listener ever registered there; never creates one. */
++    public GameEventListenerRegistry getExistingListenerRegistry(final int section) {
++        return this.getListenerRegistry(section);
+     }
+ 
+     public @Nullable BlockState setBlockState(final BlockPos pos, final BlockState state) {

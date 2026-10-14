@@ -1,0 +1,31 @@
+--- a/net/minecraft/network/protocol/PacketUtils.java
++++ b/net/minecraft/network/protocol/PacketUtils.java
+@@ -8,6 +_,8 @@
+ import net.minecraft.network.PacketProcessor;
+ import net.minecraft.server.RunningOnDifferentThreadException;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.network.PlayerLane;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+@@ -15,6 +_,19 @@
+     private static final Logger LOGGER = LogUtils.getLogger();
+ 
+     public static <T extends PacketListener> void ensureRunningOnSameThread(final Packet<T> packet, final T listener, final ServerLevel level) throws RunningOnDifferentThreadException {
++        // A player's world packets run on the player's lane, never on the server thread.
++        if (listener instanceof ServerGamePacketListenerImpl game) {
++            PlayerLane lane = game.lane();
++            if (lane.isRunningHere()) {
++                return;
++            }
++
++            if (lane.isActive()) {
++                lane.submitPacket(listener, packet, ServerGamePacketListenerImpl.runsOnServerThread(packet));
++                throw RunningOnDifferentThreadException.RUNNING_ON_DIFFERENT_THREAD;
++            }
++        }
++
+         ensureRunningOnSameThread(packet, listener, level.getServer().packetProcessor());
+     }
+ 

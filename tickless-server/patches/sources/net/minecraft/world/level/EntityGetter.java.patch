@@ -1,0 +1,25 @@
+--- a/net/minecraft/world/level/EntityGetter.java
++++ b/net/minecraft/world/level/EntityGetter.java
+@@ -18,6 +_,11 @@
+ public interface EntityGetter {
+     List<Entity> getEntities(@Nullable Entity except, AABB bb, Predicate<? super Entity> selector);
+ 
++    /** {@link #getEntities(Entity, AABB, Predicate)} limited to entities that {@link Entity#mayBeCollidedWith may be collided with}. */
++    default List<Entity> getHardColliders(final @Nullable Entity except, final AABB bb, final Predicate<? super Entity> selector) {
++        return this.getEntities(except, bb, entity -> entity.mayBeCollidedWith() && selector.test(entity));
++    }
++
+     <T extends Entity> List<T> getEntities(final EntityTypeTest<Entity, T> type, final AABB bb, final Predicate<? super T> selector);
+ 
+     default <T extends Entity> List<T> getEntitiesOfClass(final Class<T> baseClass, final AABB bb, final Predicate<? super T> selector) {
+@@ -57,7 +_,9 @@
+         }
+ 
+         Predicate<Entity> canCollide = source == null ? EntitySelector.CAN_BE_COLLIDED_WITH : EntitySelector.NO_SPECTATORS.and(source::canCollideWith);
+-        List<Entity> collidingEntities = this.getEntities(source, testArea.inflate(1.0E-7), canCollide);
++        List<Entity> collidingEntities = source == null || source.collidesOnlyWithHardColliders()
++            ? this.getHardColliders(source, testArea.inflate(1.0E-7), canCollide)
++            : this.getEntities(source, testArea.inflate(1.0E-7), canCollide);
+         if (collidingEntities.isEmpty()) {
+             return List.of();
+         }

@@ -1,0 +1,17 @@
+--- a/net/minecraft/world/level/entity/LevelEntityGetter.java
++++ b/net/minecraft/world/level/entity/LevelEntityGetter.java
+@@ -17,5 +_,14 @@
+ 
+     void get(final AABB bb, final Consumer<T> output);
+ 
++    /** Entities in {@code bb} that {@link EntityAccess#mayBeCollidedWith may be collided with}. */
++    default void getHardColliders(final AABB bb, final Consumer<T> output) {
++        this.get(bb, entity -> {
++            if (entity.mayBeCollidedWith()) {
++                output.accept(entity);
++            }
++        });
++    }
++
+     <U extends T> void get(final EntityTypeTest<T, U> type, final AABB bb, final AbortableIterationConsumer<U> consumer);
+ }

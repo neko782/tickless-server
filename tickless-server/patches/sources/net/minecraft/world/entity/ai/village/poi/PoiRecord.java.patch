@@ -1,0 +1,29 @@
+--- a/net/minecraft/world/entity/ai/village/poi/PoiRecord.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiRecord.java
+@@ -12,7 +_,7 @@
+ public class PoiRecord {
+     private final BlockPos pos;
+     private final Holder<PoiType> poiType;
+-    private int freeTickets;
++    private volatile int freeTickets;
+     private final Runnable setDirty;
+ 
+     private PoiRecord(final BlockPos pos, final Holder<PoiType> poiType, final int freeTickets, final Runnable setDirty) {
+@@ -36,7 +_,7 @@
+         return this.freeTickets;
+     }
+ 
+-    protected boolean acquireTicket() {
++    protected synchronized boolean acquireTicket() {
+         if (this.freeTickets <= 0) {
+             return false;
+         }
+@@ -46,7 +_,7 @@
+         return true;
+     }
+ 
+-    protected boolean releaseTicket() {
++    protected synchronized boolean releaseTicket() {
+         if (this.freeTickets >= this.poiType.value().maxTickets()) {
+             return false;
+         }

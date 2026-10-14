@@ -1,0 +1,14 @@
+--- a/net/minecraft/CrashReport.java
++++ b/net/minecraft/CrashReport.java
+@@ -224,6 +_,11 @@
+             t = t.getCause();
+         }
+ 
++        if (t instanceof net.minecraft.world.level.parallel.WorldTxn.Abort abort) {
++            // A world event being rolled back, not a crash: let it unwind to its transaction.
++            throw abort;
++        }
++
+         CrashReport report;
+         if (t instanceof ReportedException reportedException) {
+             report = reportedException.getReport();

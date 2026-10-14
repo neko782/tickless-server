@@ -1,0 +1,26 @@
+--- a/net/minecraft/world/entity/ExperienceOrb.java
++++ b/net/minecraft/world/entity/ExperienceOrb.java
+@@ -226,6 +_,11 @@
+     }
+ 
+     private void merge(final ExperienceOrb orb) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(orb);
++        if (orb.isRemoved() || this.isRemoved()) {
++            return;
++        }
++
+         this.count = this.count + orb.count;
+         this.age = Math.min(this.age, orb.age);
+         orb.discard();
+@@ -278,6 +_,11 @@
+ 
+     @Override
+     public void playerTouch(final Player player) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
++        if (this.isRemoved()) {
++            return;
++        }
++
+         if (player instanceof ServerPlayer serverPlayer) {
+             if (player.takeXpDelay == 0) {
+                 player.takeXpDelay = 2;

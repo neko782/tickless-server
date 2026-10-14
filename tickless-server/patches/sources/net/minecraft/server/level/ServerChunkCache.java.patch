@@ -1,0 +1,373 @@
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -8,6 +_,7 @@
+ import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
+ import java.io.IOException;
+ import java.nio.file.Path;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.List;
+ import java.util.Objects;
+@@ -15,6 +_,8 @@
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.CompletionStage;
+ import java.util.concurrent.Executor;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
+ import java.util.function.BooleanSupplier;
+ import java.util.function.Consumer;
+ import java.util.function.Predicate;
+@@ -44,6 +_,7 @@
+ import net.minecraft.world.level.chunk.LevelChunk;
+ import net.minecraft.world.level.chunk.LightChunk;
+ import net.minecraft.world.level.chunk.status.ChunkStatus;
++import net.minecraft.world.level.parallel.WorldTxn;
+ import net.minecraft.world.level.chunk.storage.ChunkScanAccess;
+ import net.minecraft.world.level.entity.ChunkStatusUpdateListener;
+ import net.minecraft.world.level.gamerules.GameRules;
+@@ -64,13 +_,15 @@
+     public final ChunkMap chunkMap;
+     private final SavedDataStorage savedDataStorage;
+     private final TicketStorage ticketStorage;
+-    private boolean spawnEnemies = true;
++    private volatile boolean spawnEnemies = true;
+     private static final int CACHE_SIZE = 4;
+     private final long[] lastChunkPos = new long[4];
+     private final @Nullable ChunkStatus[] lastChunkStatus = new ChunkStatus[4];
+     private final @Nullable ChunkAccess[] lastChunk = new ChunkAccess[4];
+     private final List<LevelChunk> spawningChunks = new ObjectArrayList<>();
+-    private final Set<ChunkHolder> chunkHoldersToBroadcast = new ReferenceOpenHashSet<>();
++    private final Set<ChunkHolder> chunkHoldersToBroadcast = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    private final int broadcastWorkers;
++    private final @Nullable ExecutorService broadcastExecutor;
+     @VisibleForDebug
+     private NaturalSpawner.@Nullable SpawnState lastSpawnState;
+ 
+@@ -87,6 +_,10 @@
+         final ChunkStatusUpdateListener chunkStatusListener
+     ) {
+         this.level = level;
++        this.broadcastWorkers = Runtime.getRuntime().availableProcessors() - 1;
++        this.broadcastExecutor = this.broadcastWorkers > 1
++            ? Executors.newFixedThreadPool(this.broadcastWorkers, Thread.ofPlatform().daemon().name("Chunk broadcast-", 0).factory())
++            : null;
+         this.mainThreadProcessor = new ServerChunkCache.MainThreadExecutor(level);
+         this.mainThread = Thread.currentThread();
+         Path dataFolder = levelStorage.getDimensionPath(level.dimension()).resolve("data");
+@@ -143,7 +_,26 @@
+     @Override
+     public @Nullable ChunkAccess getChunk(final int x, final int z, final ChunkStatus targetStatus, final boolean loadOrGenerate) {
+         if (Thread.currentThread() != this.mainThread) {
+-            return CompletableFuture.<ChunkAccess>supplyAsync(() -> this.getChunk(x, z, targetStatus, loadOrGenerate), this.mainThreadProcessor).join();
++            ChunkAccess loaded = this.getLoadedChunkOffThread(x, z, targetStatus);
++            if (loaded != null) {
++                return loaded;
++            }
++
++            // The server thread only starts the load and the worker waits for the chunk. Waiting on
++            // the server thread (as vanilla's synchronous load does) stopped every connection while an
++            // explosion at the edge of the world generated new terrain.
++            ChunkResult<ChunkAccess> result = net.minecraft.world.level.parallel.WorldTxn.awaitServerThread(
++                CompletableFuture.supplyAsync(
++                        () -> this.getChunkFutureMainThread(x, z, targetStatus, loadOrGenerate, TicketType.WORKER_LOAD), this.mainThreadProcessor
++                    )
++                    .thenCompose(future -> future)
++            );
++            ChunkAccess chunk = result.orElse(null);
++            if (chunk == null && loadOrGenerate) {
++                throw new IllegalStateException("Chunk not there when requested: " + result.getError());
++            }
++
++            return chunk;
+         }
+ 
+         ProfilerFiller profiler = Profiler.get();
+@@ -172,10 +_,27 @@
+         return chunk;
+     }
+ 
++    /**
++     * Returns an already loaded chunk without the server-thread cache. World workers use this for
++     * nearly every block access, so it must not queue work on the server thread.
++     */
++    private @Nullable ChunkAccess getLoadedChunkOffThread(final int x, final int z, final ChunkStatus targetStatus) {
++        ChunkHolder chunkHolder = this.getVisibleChunkIfPresent(ChunkPos.pack(x, z));
++        if (chunkHolder == null || this.chunkAbsent(chunkHolder, ChunkLevel.byStatus(targetStatus))) {
++            return null;
++        }
++
++        if (targetStatus == ChunkStatus.FULL) {
++            return chunkHolder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
++        }
++
++        return chunkHolder.getChunkIfPresent(targetStatus);
++    }
++
+     @Override
+     public @Nullable LevelChunk getChunkNow(final int x, final int z) {
+         if (Thread.currentThread() != this.mainThread) {
+-            return null;
++            return WorldTxn.isParticipant() && this.getLoadedChunkOffThread(x, z, ChunkStatus.FULL) instanceof LevelChunk levelChunk ? levelChunk : null;
+         }
+ 
+         Profiler.get().incrementCounter("getChunkNow");
+@@ -228,12 +_,18 @@
+     private CompletableFuture<ChunkResult<ChunkAccess>> getChunkFutureMainThread(
+         final int x, final int z, final ChunkStatus targetStatus, final boolean loadOrGenerate
+     ) {
++        return this.getChunkFutureMainThread(x, z, targetStatus, loadOrGenerate, TicketType.UNKNOWN);
++    }
++
++    private CompletableFuture<ChunkResult<ChunkAccess>> getChunkFutureMainThread(
++        final int x, final int z, final ChunkStatus targetStatus, final boolean loadOrGenerate, final TicketType ticketType
++    ) {
+         ChunkPos pos = new ChunkPos(x, z);
+         long key = pos.pack();
+         int targetTicketLevel = ChunkLevel.byStatus(targetStatus);
+         ChunkHolder chunkHolder = this.getVisibleChunkIfPresent(key);
+         if (loadOrGenerate) {
+-            this.addTicket(new Ticket(TicketType.UNKNOWN, targetTicketLevel), pos);
++            this.addTicket(new Ticket(ticketType, targetTicketLevel), pos);
+             if (this.chunkAbsent(chunkHolder, targetTicketLevel)) {
+                 ProfilerFiller profiler = Profiler.get();
+                 profiler.push("chunkLoad");
+@@ -306,6 +_,10 @@
+ 
+     @Override
+     public void close() throws IOException {
++        if (this.broadcastExecutor != null) {
++            this.broadcastExecutor.close();
++        }
++
+         this.save(true);
+         this.savedDataStorage.close();
+         this.lightEngine.close();
+@@ -324,6 +_,7 @@
+         profiler.popPush("chunks");
+         if (tickChunks) {
+             this.tickChunks();
++            this.level.runTrackerUpdates();
+             this.chunkMap.tick();
+         }
+ 
+@@ -337,38 +_,83 @@
+         if (!this.level.isDebug()) {
+             ProfilerFiller profiler = Profiler.get();
+             profiler.push("pollingChunks");
+-            if (this.level.tickRateManager().runsNormally()) {
+-                profiler.push("tickingChunks");
+-                this.tickChunks(profiler);
+-                profiler.pop();
+-            }
+-
+             this.broadcastChangedChunks(profiler);
+             profiler.pop();
+         }
+     }
+ 
++    public void runNaturalSpawning() {
++        if (this.level.isDebug() || !this.level.tickRateManager().runsNormally()) {
++            return;
++        }
++        ProfilerFiller profiler = Profiler.get();
++        profiler.push("naturalSpawning");
++        try {
++            this.tickSpawningChunks(profiler);
++        } finally {
++            profiler.pop();
++        }
++    }
++
+     private void broadcastChangedChunks(final ProfilerFiller profiler) {
+         profiler.push("broadcast");
+-
+-        for (ChunkHolder chunkHolder : this.chunkHoldersToBroadcast) {
+-            LevelChunk chunk = chunkHolder.getTickingChunk();
+-            if (chunk != null) {
+-                chunkHolder.broadcastChanges(chunk);
+-            }
+-        }
+-
+-        this.chunkHoldersToBroadcast.clear();
++        // World workers add holders concurrently. Remove each holder before preparing it so a
++        // change that arrives afterwards queues the holder again instead of being cleared.
++        List<ChunkHolder> toBroadcast = new ArrayList<>();
++        for (java.util.Iterator<ChunkHolder> iterator = this.chunkHoldersToBroadcast.iterator(); iterator.hasNext(); ) {
++            toBroadcast.add(iterator.next());
++            iterator.remove();
++        }
++
++        if (this.broadcastExecutor == null || toBroadcast.size() < 64 || this.level.players().isEmpty()) {
++            for (ChunkHolder chunkHolder : toBroadcast) {
++                LevelChunk chunk = chunkHolder.getTickingChunk();
++                if (chunk != null) {
++                    chunkHolder.broadcastChanges(chunk);
++                }
++            }
++        } else {
++            List<ChunkHolder> holders = new ArrayList<>(toBroadcast.size());
++            List<LevelChunk> chunks = new ArrayList<>(toBroadcast.size());
++            for (ChunkHolder chunkHolder : toBroadcast) {
++                LevelChunk chunk = chunkHolder.getTickingChunk();
++                if (chunk != null) {
++                    holders.add(chunkHolder);
++                    chunks.add(chunk);
++                }
++            }
++
++            int taskCount = Math.min(this.broadcastWorkers, Math.max(1, holders.size() / 16));
++            List<CompletableFuture<List<List<Runnable>>>> prepared = new ArrayList<>(taskCount);
++            int batchSize = Math.max(1, (holders.size() + taskCount - 1) / taskCount);
++            for (int start = 0; start < holders.size(); start += batchSize) {
++                int from = start;
++                int to = Math.min(start + batchSize, holders.size());
++                prepared.add(CompletableFuture.supplyAsync(() -> {
++                    List<List<Runnable>> batch = new ArrayList<>(to - from);
++                    for (int index = from; index < to; index++) {
++                        batch.add(holders.get(index).prepareBroadcastChanges(chunks.get(index)));
++                    }
++
++                    return batch;
++                }, this.broadcastExecutor));
++            }
++
++            CompletableFuture.allOf(prepared.toArray(CompletableFuture[]::new)).join();
++            for (CompletableFuture<List<List<Runnable>>> pending : prepared) {
++                pending.join().forEach(actions -> actions.forEach(Runnable::run));
++            }
++        }
++
+         profiler.pop();
+     }
+ 
+-    private void tickChunks(final ProfilerFiller profiler) {
++    private void tickSpawningChunks(final ProfilerFiller profiler) {
+         profiler.push("naturalSpawnCount");
+         int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+         NaturalSpawner.SpawnState spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this::getFullChunk, new LocalMobCapCalculator(this.chunkMap));
+         this.lastSpawnState = spawnCookie;
+         boolean doMobSpawning = this.level.getGameRules().get(GameRules.SPAWN_MOBS);
+-        int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+         List<MobCategory> spawningCategories;
+         if (doMobSpawning) {
+             boolean spawnPersistent = this.level.getGameTime() % 400L == 0L;
+@@ -378,6 +_,7 @@
+         }
+ 
+         List<LevelChunk> spawningChunks = this.spawningChunks;
++        LevelEventScheduler scheduler = this.level.eventScheduler();
+ 
+         try {
+             profiler.popPush("filteringSpawningChunks");
+@@ -387,19 +_,17 @@
+             profiler.popPush("tickSpawningChunks");
+ 
+             for (LevelChunk chunk : spawningChunks) {
+-                this.tickSpawningChunk(chunk, spawningCategories, spawnCookie);
++                ChunkPos pos = chunk.getPos();
++                scheduler.runBlockEventAsync(
++                    new BlockPos(pos.getMiddleBlockX(), this.level.getSeaLevel(), pos.getMiddleBlockZ()),
++                    () -> this.tickSpawningChunk(chunk, spawningCategories, spawnCookie),
++                    "spawning"
++                );
+             }
+         } finally {
+             spawningChunks.clear();
+         }
+ 
+-        profiler.popPush("tickTickingChunks");
+-        this.chunkMap.forEachBlockTickingChunk(chunkx -> this.level.tickChunk(chunkx, tickSpeed));
+-        if (doMobSpawning) {
+-            profiler.popPush("customSpawners");
+-            this.level.tickCustomSpawners(this.spawnEnemies);
+-        }
+-
+         profiler.pop();
+     }
+ 
+@@ -475,10 +_,21 @@
+     }
+ 
+     public void addTicket(final Ticket ticket, final ChunkPos pos) {
++        if (Thread.currentThread() != this.mainThread) {
++            // Tickets drive the chunk system, which only the server thread may change.
++            this.mainThreadProcessor.execute(() -> this.addTicket(ticket, pos));
++            return;
++        }
++
+         this.ticketStorage.addTicket(ticket, pos);
+     }
+ 
+     public CompletableFuture<?> addTicketAndLoadWithRadius(final TicketType type, final ChunkPos pos, final int radius) {
++        if (Thread.currentThread() != this.mainThread) {
++            return CompletableFuture.supplyAsync(() -> this.addTicketAndLoadWithRadius(type, pos, radius), this.mainThreadProcessor)
++                .thenCompose(future -> future);
++        }
++
+         if (!type.doesLoad()) {
+             throw new IllegalStateException("Ticket type " + type + " does not trigger chunk loading");
+         }
+@@ -495,15 +_,30 @@
+     }
+ 
+     public void addTicketWithRadius(final TicketType type, final ChunkPos pos, final int radius) {
++        if (Thread.currentThread() != this.mainThread) {
++            this.mainThreadProcessor.execute(() -> this.addTicketWithRadius(type, pos, radius));
++            return;
++        }
++
+         this.ticketStorage.addTicketWithRadius(type, pos, radius);
+     }
+ 
+     public void removeTicketWithRadius(final TicketType type, final ChunkPos pos, final int radius) {
++        if (Thread.currentThread() != this.mainThread) {
++            this.mainThreadProcessor.execute(() -> this.removeTicketWithRadius(type, pos, radius));
++            return;
++        }
++
+         this.ticketStorage.removeTicketWithRadius(type, pos, radius);
+     }
+ 
+     @Override
+     public boolean updateChunkForced(final ChunkPos pos, final boolean forced) {
++        if (Thread.currentThread() != this.mainThread) {
++            this.mainThreadProcessor.execute(() -> this.updateChunkForced(pos, forced));
++            return true;
++        }
++
+         return this.ticketStorage.updateChunkForced(pos, forced);
+     }
+ 
+@@ -513,6 +_,21 @@
+     }
+ 
+     public void move(final ServerPlayer player) {
++        if (Thread.currentThread() != this.mainThread) {
++            // Player lanes move players on world workers; the chunk map, tickets and chunk sending
++            // belong to the server thread. One pending update per player covers any number of moves.
++            if (player.chunkMoveQueued.compareAndSet(false, true)) {
++                this.level.getServer().execute(() -> {
++                    player.chunkMoveQueued.set(false);
++                    if (player.level().getChunkSource() == this) {
++                        this.move(player);
++                    }
++                });
++            }
++
++            return;
++        }
++
+         if (!player.isRemoved()) {
+             this.chunkMap.move(player);
+             if (player.isReceivingWaypoints()) {
+@@ -558,6 +_,10 @@
+     @Override
+     public void setSpawnSettings(final boolean spawnEnemies) {
+         this.spawnEnemies = spawnEnemies;
++    }
++
++    public boolean spawnsEnemies() {
++        return this.spawnEnemies;
+     }
+ 
+     public String getChunkDebugData(final ChunkPos pos) {

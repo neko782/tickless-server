@@ -1,0 +1,26 @@
+--- a/net/minecraft/world/entity/monster/Enderman.java
++++ b/net/minecraft/world/entity/monster/Enderman.java
+@@ -472,6 +_,9 @@
+             int yt = Mth.floor(this.enderman.getY() + random.nextDouble() * 2.0);
+             int zt = Mth.floor(this.enderman.getZ() - 1.0 + random.nextDouble() * 2.0);
+             BlockPos pos = new BlockPos(xt, yt, zt);
++            // Entity updates read blocks without locks. Lock the target before reading it, so two
++            // endermen cannot both see it free and one overwrite the other's block.
++            level.worldLocks().lockBlock(pos);
+             BlockState targetState = level.getBlockState(pos);
+             BlockPos below = pos.below();
+             BlockState belowState = level.getBlockState(below);
+@@ -618,6 +_,13 @@
+             BlockHitResult result = level.clip(new ClipContext(from, to, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, this.enderman));
+             boolean reachable = result.getBlockPos().equals(pos);
+             if (blockState.is(BlockTags.ENDERMAN_HOLDABLE) && reachable) {
++                // Read again under the block's lock: another enderman may have taken it meanwhile.
++                level.worldLocks().lockBlock(pos);
++                blockState = level.getBlockState(pos);
++                if (!blockState.is(BlockTags.ENDERMAN_HOLDABLE)) {
++                    return;
++                }
++
+                 level.removeBlock(pos, false);
+                 level.gameEvent(GameEvent.BLOCK_DESTROY, pos, GameEvent.Context.of(this.enderman, blockState));
+                 this.enderman.setCarriedBlock(blockState.getBlock().defaultBlockState());

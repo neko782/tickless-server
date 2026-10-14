@@ -1,0 +1,62 @@
+--- a/net/minecraft/world/level/block/RedstoneWireBlock.java
++++ b/net/minecraft/world/level/block/RedstoneWireBlock.java
+@@ -63,7 +_,11 @@
+     private final Function<BlockState, VoxelShape> shapes;
+     private final BlockState crossState;
+     private final RedstoneWireEvaluator evaluator = new DefaultRedstoneWireEvaluator(this);
+-    private boolean shouldSignal = true;
++    // Vanilla keeps this flag on the block singleton and clears it while a wire measures the power
++    // it receives from other blocks. World workers measure wires concurrently, so each thread
++    // needs its own flag; a shared one lets threads see each other's wires as sources and never
++    // settle on a power level.
++    private static final ThreadLocal<boolean[]> SIGNAL_SUPPRESSED = ThreadLocal.withInitial(() -> new boolean[1]);
+ 
+     public RedstoneWireBlock(final BlockBehaviour.Properties properties) {
+         super(properties);
+@@ -277,10 +_,14 @@
+     }
+ 
+     public int getBlockSignal(final Level level, final BlockPos pos) {
+-        this.shouldSignal = false;
+-        int blockSignal = level.getBestNeighborSignal(pos);
+-        this.shouldSignal = true;
+-        return blockSignal;
++        boolean[] suppressed = SIGNAL_SUPPRESSED.get();
++        boolean previous = suppressed[0];
++        suppressed[0] = true;
++        try {
++            return level.getBestNeighborSignal(pos);
++        } finally {
++            suppressed[0] = previous;
++        }
+     }
+ 
+     private void checkCornerChangeAt(final Level level, final BlockPos pos) {
+@@ -355,12 +_,12 @@
+ 
+     @Override
+     protected int getDirectSignal(final BlockState state, final BlockGetter level, final BlockPos pos, final Direction direction) {
+-        return !this.shouldSignal ? Redstone.SIGNAL_MIN : state.getSignal(level, pos, direction);
++        return !this.shouldSignal() ? Redstone.SIGNAL_MIN : state.getSignal(level, pos, direction);
+     }
+ 
+     @Override
+     protected int getSignal(final BlockState state, final BlockGetter level, final BlockPos pos, final Direction direction) {
+-        if (this.shouldSignal && direction != Direction.DOWN) {
++        if (this.shouldSignal() && direction != Direction.DOWN) {
+             int power = this.ownSignal(state, level, pos);
+             if (power == 0) {
+                 return Redstone.SIGNAL_MIN;
+@@ -395,7 +_,11 @@
+ 
+     @Override
+     protected boolean isSignalSource(final BlockState state) {
+-        return this.shouldSignal;
++        return this.shouldSignal();
++    }
++
++    private boolean shouldSignal() {
++        return !SIGNAL_SUPPRESSED.get()[0];
+     }
+ 
+     public static int getColorForPower(final int power) {

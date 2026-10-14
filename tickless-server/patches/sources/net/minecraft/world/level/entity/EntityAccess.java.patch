@@ -1,0 +1,23 @@
+--- a/net/minecraft/world/level/entity/EntityAccess.java
++++ b/net/minecraft/world/level/entity/EntityAccess.java
+@@ -23,4 +_,20 @@
+     boolean shouldBeSaved();
+ 
+     boolean isAlwaysTicking();
++
++    /**
++     * The stamp {@link EntitySection} gave this entity when it joined its current section, unique
++     * per join, or 0 while it is in no section.
++     */
++    long sectionStamp();
++
++    void setSectionStamp(long stamp);
++
++    /**
++     * Whether this entity's class can ever report that another entity collides with it like a
++     * block (boats, shulkers). Must not change over the entity's lifetime.
++     */
++    default boolean mayBeCollidedWith() {
++        return false;
++    }
+ }

@@ -1,0 +1,77 @@
+--- a/net/minecraft/world/level/pathfinder/PathTypeCache.java
++++ b/net/minecraft/world/level/pathfinder/PathTypeCache.java
+@@ -1,43 +_,48 @@
+ package net.minecraft.world.level.pathfinder;
+ 
+ import it.unimi.dsi.fastutil.HashCommon;
++import java.lang.invoke.MethodHandles;
++import java.lang.invoke.VarHandle;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.world.level.BlockGetter;
+-import org.jspecify.annotations.Nullable;
+ 
++/**
++ * A lossy, level-wide cache of path types by position, shared by every world worker.
++ *
++ * <p>Each slot is one long that holds both the position and its type, so concurrent writers can
++ * replace each other's entries but never pair a position with another position's type. The
++ * position is {@code mix(pos)}: its low bits pick the slot and the slot keeps the other bits, so a
++ * hit is exact ({@code mix} is a bijection). The vanilla cache kept positions and types in two
++ * arrays of 4096, which workers kept overwriting under one another.
++ */
+ public class PathTypeCache {
+-    private static final int SIZE = 4096;
+-    private static final int MASK = 4095;
+-    private final long[] positions = new long[4096];
+-    private final PathType[] pathTypes = new PathType[4096];
++    private static final int BITS = 16;
++    private static final int MASK = (1 << BITS) - 1;
++    private static final PathType[] TYPES = PathType.values();
++    private static final VarHandle ENTRY = MethodHandles.arrayElementVarHandle(long[].class);
++    private final long[] entries = new long[1 << BITS];
+ 
+     public PathType getOrCompute(final BlockGetter level, final BlockPos pos) {
+-        long key = pos.asLong();
+-        int index = index(key);
+-        PathType cachedPathType = this.get(index, key);
+-        return cachedPathType != null ? cachedPathType : this.compute(level, pos, index, key);
+-    }
+-
+-    private @Nullable PathType get(final int index, final long key) {
+-        return this.positions[index] == key ? this.pathTypes[index] : null;
+-    }
+-
+-    private PathType compute(final BlockGetter level, final BlockPos pos, final int index, final long key) {
++        long mixed = HashCommon.mix(pos.asLong());
++        int index = (int)mixed & MASK;
++        // Opaque accesses guarantee atomic longs without ordering unrelated world state.
++        long entry = (long)ENTRY.getOpaque(this.entries, index);
++        // The low byte holds the type's ordinal + 1, so an empty slot never matches.
++        if (entry != 0L && entry >>> 8 == mixed >>> 8) {
++            return TYPES[(int)(entry & 0xFF) - 1];
++        }
++
+         PathType pathType = WalkNodeEvaluator.getPathTypeFromState(level, pos);
+-        this.positions[index] = key;
+-        this.pathTypes[index] = pathType;
++        ENTRY.setOpaque(this.entries, index, mixed >>> 8 << 8 | pathType.ordinal() + 1);
+         return pathType;
+     }
+ 
+     public void invalidate(final BlockPos pos) {
+-        long key = pos.asLong();
+-        int index = index(key);
+-        if (this.positions[index] == key) {
+-            this.pathTypes[index] = null;
++        long mixed = HashCommon.mix(pos.asLong());
++        int index = (int)mixed & MASK;
++        long entry = (long)ENTRY.getOpaque(this.entries, index);
++        if (entry != 0L && entry >>> 8 == mixed >>> 8) {
++            ENTRY.setOpaque(this.entries, index, 0L);
+         }
+-    }
+-
+-    private static int index(final long pos) {
+-        return (int)HashCommon.mix(pos) & 4095;
+     }
+ }

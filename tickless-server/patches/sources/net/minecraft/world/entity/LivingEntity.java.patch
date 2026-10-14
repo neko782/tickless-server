@@ -1,0 +1,164 @@
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -102,7 +_,6 @@
+ import net.minecraft.world.item.component.BlocksAttacks;
+ import net.minecraft.world.item.component.DeathProtection;
+ import net.minecraft.world.item.component.KineticWeapon;
+-import net.minecraft.world.item.component.MobVisibility;
+ import net.minecraft.world.item.component.SwingAnimation;
+ import net.minecraft.world.item.component.Weapon;
+ import net.minecraft.world.item.enchantment.Enchantment;
+@@ -919,7 +_,7 @@
+         }
+ 
+         if (this.isInvisible()) {
+-            float coverPercentage = this.getArmorCoverPercentage();
++            float coverPercentage = this.equipment.armorCoverForVisibility();
+             if (coverPercentage < 0.1F) {
+                 coverPercentage = 0.1F;
+             }
+@@ -928,16 +_,7 @@
+         }
+ 
+         if (targetingEntity != null) {
+-            for (EquipmentSlot slot : EquipmentSlot.VALUES) {
+-                ItemStack item = this.getItemBySlot(slot);
+-                MobVisibility mobVisibility = item.get(DataComponents.MOB_VISIBILITY);
+-                if (mobVisibility != null) {
+-                    Equippable equippable = item.get(DataComponents.EQUIPPABLE);
+-                    if (equippable != null && slot == equippable.slot() && mobVisibility.targetingEntityTypes().contains(targetingEntity.typeHolder())) {
+-                        visibilityPercent *= mobVisibility.visibility();
+-                    }
+-                }
+-            }
++            visibilityPercent = this.equipment.applyVisibility(visibilityPercent, targetingEntity);
+         }
+ 
+         return Mth.clamp(visibilityPercent, 0.0, 10.0);
+@@ -1010,6 +_,7 @@
+     }
+ 
+     public boolean addEffect(final MobEffectInstance newEffect, final @Nullable Entity source) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
+         if (!this.canBeAffected(newEffect)) {
+             return false;
+         }
+@@ -1152,6 +_,7 @@
+     }
+ 
+     public void heal(final float heal) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
+         float health = this.getHealth();
+         if (health > 0.0F) {
+             this.setHealth(health + heal);
+@@ -1159,7 +_,7 @@
+     }
+ 
+     public float getHealth() {
+-        return this.entityData.get(DATA_HEALTH_ID);
++        return this.healthMirror;
+     }
+ 
+     public void setHealth(final float health) {
+@@ -1176,6 +_,7 @@
+ 
+     @Override
+     public boolean hurtServer(final ServerLevel level, final DamageSource source, float damage) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
+         if (this.isInvulnerableTo(level, source)) {
+             return false;
+         }
+@@ -1645,6 +_,7 @@
+     }
+ 
+     public void knockback(double power, double xd, double zd, final DamageSource source, final float damage, final boolean comesFromEffect) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
+         power *= 1.0 - this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE);
+         if (!(power <= 0.0)) {
+             this.needsSync = true;
+@@ -3238,9 +_,12 @@
+                 }
+             }
+ 
+-            for (Entity entity : pushableEntities) {
+-                this.doPush(entity);
+-            }
++            // Pushing nudges neighbours without their locks; a lost nudge is not visible in play.
++            net.minecraft.world.level.parallel.WorldOwnership.racy(() -> {
++                for (Entity entity : pushableEntities) {
++                    this.doPush(entity);
++                }
++            });
+         }
+     }
+ 
+@@ -3363,12 +_,44 @@
+         return !this.isRemoved();
+     }
+ 
++    // Copies of synced data that neighbours read for every pair while pushing and sensing, kept
++    // in plain fields so a check is one load instead of a walk through the synced data table.
++    // Updated by onSyncedDataUpdated, which every write of the synced value goes through.
++    private float healthMirror = 1.0F;
++    private boolean sleepingMirror;
++    @net.minecraft.world.level.parallel.Unowned
++    private long pushablePlaceCheckedAt = Long.MIN_VALUE;
++    @net.minecraft.world.level.parallel.Unowned
++    private boolean pushablePlaceCached;
++
+     @Override
+     public boolean isPushable() {
+-        return (this.isAlwaysTicking() || !(this.level() instanceof ServerLevel level && !level.isPositionEntityTicking(this.blockPosition())))
+-            && this.isAlive()
+-            && !this.isSpectator()
+-            && !this.onClimbable();
++        if (!this.isAlive() || this.isSpectator()) {
++            return false;
++        }
++
++        if (this.level() instanceof ServerLevel level) {
++            return this.isPushableHereCached(level);
++        }
++
++        return !this.onClimbable();
++    }
++
++    /**
++     * The position-dependent part of {@link #isPushable}: the entity is in the entity-ticking area
++     * (or always ticks) and is not on a ladder. Every neighbour asks while pushing, so a crowd
++     * would otherwise repeat two hash lookups and a block lookup per pair; the answer is kept for
++     * one game tick. The cache is written without synchronization by whichever thread asks; a
++     * racing or stale answer only changes a push for one tick.
++     */
++    private boolean isPushableHereCached(final ServerLevel level) {
++        long now = level.getGameTime();
++        if (this.pushablePlaceCheckedAt != now) {
++            this.pushablePlaceCached = (this.isAlwaysTicking() || level.isPositionEntityTicking(this.blockPosition())) && !this.onClimbable();
++            this.pushablePlaceCheckedAt = now;
++        }
++
++        return this.pushablePlaceCached;
+     }
+ 
+     @Override
+@@ -3519,7 +_,10 @@
+     @Override
+     public void onSyncedDataUpdated(final EntityDataAccessor<?> accessor) {
+         super.onSyncedDataUpdated(accessor);
+-        if (SLEEPING_POS_ID.equals(accessor)) {
++        if (DATA_HEALTH_ID.equals(accessor)) {
++            this.healthMirror = this.entityData.get(DATA_HEALTH_ID);
++        } else if (SLEEPING_POS_ID.equals(accessor)) {
++            this.sleepingMirror = this.getSleepingPos().isPresent();
+             if (this.level().isClientSide()) {
+                 this.getSleepingPos().ifPresent(this::setPosToBed);
+             }
+@@ -3792,7 +_,7 @@
+     }
+ 
+     public boolean isSleeping() {
+-        return this.getSleepingPos().isPresent();
++        return this.sleepingMirror;
+     }
+ 
+     public boolean startSleeping(final BlockPos bedPosition) {

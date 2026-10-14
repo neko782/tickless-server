@@ -1,0 +1,29 @@
+--- a/net/minecraft/world/entity/item/FallingBlockEntity.java
++++ b/net/minecraft/world/entity/item/FallingBlockEntity.java
+@@ -184,7 +_,26 @@
+                         this.discard();
+                     }
+                 } else {
++                    // Entity updates read blocks without locks. Lock the landing spot so two falling
++                    // blocks cannot both see it free and overwrite each other.
++                    serverLevel.worldLocks().lockBlock(pos);
+                     BlockState currentState = this.level().getBlockState(pos);
++                    // A falling block cannot move into a full block, so one that is here appeared
++                    // while this one fell: other blocks of the same column, which tick on other
++                    // workers and can land in any order. Stack on top of them, as when they land
++                    // one after the other.
++                    for (int climb = 0; climb < 8 && currentState.isCollisionShapeFullBlock(this.level(), pos); climb++) {
++                        BlockPos above = pos.above();
++                        serverLevel.worldLocks().lockBlock(above);
++                        BlockState aboveState = this.level().getBlockState(above);
++                        if (!aboveState.canBeReplaced() && !aboveState.isCollisionShapeFullBlock(this.level(), above)) {
++                            break;
++                        }
++
++                        pos = above;
++                        currentState = aboveState;
++                    }
++
+                     this.setDeltaMovement(this.getDeltaMovement().multiply(0.7, -0.5, 0.7));
+                     if (!currentState.is(Blocks.MOVING_PISTON)) {
+                         if (!this.cancelDrop) {

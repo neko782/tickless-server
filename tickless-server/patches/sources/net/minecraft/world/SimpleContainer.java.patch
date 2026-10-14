@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/SimpleContainer.java
++++ b/net/minecraft/world/SimpleContainer.java
+@@ -12,6 +_,8 @@
+ import net.minecraft.world.level.storage.ValueOutput;
+ 
+ public class SimpleContainer implements Container, StackedContentsCompatible {
++    /** The entity this belongs to, set when an entity stores it in a field; see WorldOwnership.adopt. */
++    public net.minecraft.world.entity.@org.jspecify.annotations.Nullable Entity worldOwner;
+     private final int size;
+     private final NonNullList<ItemStack> items;
+ 

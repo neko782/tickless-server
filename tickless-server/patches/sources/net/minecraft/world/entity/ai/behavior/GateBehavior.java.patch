@@ -1,0 +1,78 @@
+--- a/net/minecraft/world/entity/ai/behavior/GateBehavior.java
++++ b/net/minecraft/world/entity/ai/behavior/GateBehavior.java
+@@ -11,6 +_,7 @@
+ import java.util.stream.Stream;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.entity.ai.Brain;
+ import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+ import net.minecraft.world.entity.ai.memory.MemoryStatus;
+ 
+@@ -69,7 +_,7 @@
+         if (this.hasRequiredMemories(body)) {
+             this.status = Behavior.Status.RUNNING;
+             this.orderPolicy.apply(this.behaviors);
+-            this.runningPolicy.apply(this.behaviors.stream(), level, body, timestamp);
++            this.runningPolicy.apply(this.behaviors, level, body, timestamp);
+             return true;
+         } else {
+             return false;
+@@ -78,17 +_,35 @@
+ 
+     @Override
+     public final void tickOrStop(final ServerLevel level, final E body, final long timestamp) {
+-        this.behaviors.stream().filter(goal -> goal.getStatus() == Behavior.Status.RUNNING).forEach(goal -> goal.tickOrStop(level, body, timestamp));
+-        if (this.behaviors.stream().noneMatch(g -> g.getStatus() == Behavior.Status.RUNNING)) {
+-            this.doStop(level, body, timestamp);
+-        }
++        for (int i = 0; i < this.behaviors.size(); i++) {
++            BehaviorControl<? super E> behavior = this.behaviors.get(i);
++            if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                behavior.tickOrStop(level, body, timestamp);
++            }
++        }
++        // A later child's callback can start or stop an earlier child. Inspect the final
++        // states in a second pass, in the same order and with the same short circuit as before.
++        for (int i = 0; i < this.behaviors.size(); i++) {
++            if (this.behaviors.get(i).getStatus() == Behavior.Status.RUNNING) {
++                return;
++            }
++        }
++        this.doStop(level, body, timestamp);
+     }
+ 
+     @Override
+     public final void doStop(final ServerLevel level, final E body, final long timestamp) {
+         this.status = Behavior.Status.STOPPED;
+-        this.behaviors.stream().filter(goal -> goal.getStatus() == Behavior.Status.RUNNING).forEach(goal -> goal.doStop(level, body, timestamp));
+-        this.exitErasedMemories.forEach(body.getBrain()::eraseMemory);
++        for (int i = 0; i < this.behaviors.size(); i++) {
++            BehaviorControl<? super E> behavior = this.behaviors.get(i);
++            if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                behavior.doStop(level, body, timestamp);
++            }
++        }
++        Brain<?> brain = body.getBrain();
++        for (MemoryModuleType<?> memory : this.exitErasedMemories) {
++            brain.eraseMemory(memory);
++        }
+     }
+ 
+     @Override
+@@ -137,5 +_,16 @@
+         public abstract <E extends LivingEntity> void apply(
+             final Stream<BehaviorControl<? super E>> behaviors, final ServerLevel level, final E body, final long timestamp
+         );
++
++        public <E extends LivingEntity> void apply(
++            final ShufflingList<BehaviorControl<? super E>> behaviors, final ServerLevel level, final E body, final long timestamp
++        ) {
++            for (int i = 0; i < behaviors.size(); i++) {
++                BehaviorControl<? super E> behavior = behaviors.get(i);
++                if (behavior.getStatus() == Behavior.Status.STOPPED && behavior.tryStart(level, body, timestamp) && this == RUN_ONE) {
++                    return;
++                }
++            }
++        }
+     }
+ }

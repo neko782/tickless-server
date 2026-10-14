@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/level/block/entity/BlockEntity.java
++++ b/net/minecraft/world/level/block/entity/BlockEntity.java
+@@ -226,6 +_,8 @@
+         this.remove = true;
+     }
+ 
++    // Called while a chunk is built or a block entity is placed; placing locks through Level.
++    @net.minecraft.world.level.parallel.Unowned
+     public void clearRemoved() {
+         this.remove = false;
+     }

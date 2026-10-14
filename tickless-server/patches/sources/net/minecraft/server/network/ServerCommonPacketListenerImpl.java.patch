@@ -1,0 +1,50 @@
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -158,11 +_,23 @@
+     }
+ 
+     public void send(final Packet<?> packet, final @Nullable ChannelFutureListener listener) {
++        if (net.minecraft.world.level.parallel.WorldUndo.isLogging()) {
++            // A packet cannot be taken back: an event that can still be rolled back sends when it
++            // commits. A rolled back move sent the client a teleport it acknowledged twice.
++            net.minecraft.world.level.parallel.WorldTxn.afterCommit(() -> this.sendNow(packet, listener));
++        } else {
++            this.sendNow(packet, listener);
++        }
++    }
++
++    private void sendNow(final Packet<?> packet, final @Nullable ChannelFutureListener listener) {
+         if (packet.isTerminal()) {
+             this.close();
+         }
+ 
+-        boolean flush = !this.suspendFlushingOnServerThread || !this.server.isSameThread();
++        // Helpers run server-thread phases while the server thread waits, so they batch like it.
++        boolean flush = !this.suspendFlushingOnServerThread
++            || !this.server.isSameThread() && !net.minecraft.world.level.parallel.ServerThreadHelpers.isHelperThread();
+ 
+         try {
+             this.connection.send(packet, listener, flush);
+@@ -179,9 +_,21 @@
+     }
+ 
+     public void disconnect(final DisconnectionDetails details) {
++        if (net.minecraft.world.level.parallel.WorldUndo.isLogging()) {
++            // Kicking cannot be rolled back: it happens when the event commits.
++            net.minecraft.world.level.parallel.WorldTxn.afterCommit(() -> this.disconnect(details));
++            return;
++        }
++
+         this.connection.send(new ClientboundDisconnectPacket(details.reason()), PacketSendListener.thenRun(() -> this.connection.disconnect(details)));
+         this.connection.setReadOnly();
+-        this.server.executeBlocking(this.connection::handleDisconnection);
++        if (!this.server.isSameThread() && net.minecraft.world.level.parallel.WorldTxn.isParticipant()) {
++            // A world event must not wait for the server thread while it holds world locks and
++            // cannot be rolled back: the server thread may be waiting for one of them.
++            this.server.execute(this.connection::handleDisconnection);
++        } else {
++            this.server.executeBlocking(this.connection::handleDisconnection);
++        }
+     }
+ 
+     protected boolean isSingleplayerOwner() {

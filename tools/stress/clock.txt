@@ -1,0 +1,15 @@
+tick freeze
+time query gametime
+sleep 1
+time query gametime
+tick step 1
+sleep 1
+time query gametime
+tick step 3
+sleep 1
+time query gametime
+tick unfreeze
+tick rate 10
+time query gametime
+sleep 3
+time query gametime

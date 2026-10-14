@@ -1,0 +1,335 @@
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -3,8 +_,6 @@
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.Maps;
+ import com.mojang.logging.LogUtils;
+-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+ import it.unimi.dsi.fastutil.shorts.ShortList;
+ import java.util.ArrayList;
+ import java.util.Collections;
+@@ -84,12 +_,15 @@
+             return "<null>";
+         }
+     };
+-    private final Map<BlockPos, LevelChunk.RebindableTickingBlockEntityWrapper> tickersInLevel = Maps.newHashMap();
+-    private boolean loaded;
++    private final Map<BlockPos, LevelChunk.RebindableTickingBlockEntityWrapper> tickersInLevel = new java.util.concurrent.ConcurrentHashMap<>();
++    private volatile boolean loaded;
++    private final LevelChunk.EventStream eventStream = new LevelChunk.EventStream();
+     private final Level level;
+-    private @Nullable Supplier<FullChunkStatus> fullStatus;
++    private volatile @Nullable Supplier<FullChunkStatus> fullStatus;
+     private LevelChunk.@Nullable PostLoadProcessor postLoad;
+-    private final Int2ObjectMap<GameEventListenerRegistry> gameEventListenerRegistrySections;
++    // Registries are created when a listener registers and stay attached (see
++    // EuclideanGameEventListenerRegistry.unregister), so posting events reads without a latch.
++    private final java.util.concurrent.ConcurrentHashMap<Integer, GameEventListenerRegistry> gameEventListenerRegistrySections;
+     private final LevelChunkTicks<Block> blockTicks;
+     private final LevelChunkTicks<Fluid> fluidTicks;
+     private LevelChunk.UnsavedListener unsavedListener = chunkPos -> {};
+@@ -111,7 +_,7 @@
+     ) {
+         super(pos, upgradeData, level, level.palettedContainerFactory(), inhabitedTime, sections, blendingData);
+         this.level = level;
+-        this.gameEventListenerRegistrySections = new Int2ObjectOpenHashMap<>();
++        this.gameEventListenerRegistrySections = new java.util.concurrent.ConcurrentHashMap<>();
+ 
+         for (Heightmap.Types type : Heightmap.Types.values()) {
+             if (ChunkStatus.FULL.heightmapsAfter().contains(type)) {
+@@ -197,10 +_,21 @@
+ 
+     @Override
+     public GameEventListenerRegistry getListenerRegistry(final int section) {
+-        return this.level instanceof ServerLevel serverLevel
+-            ? this.gameEventListenerRegistrySections
+-                .computeIfAbsent(section, key -> new EuclideanGameEventListenerRegistry(serverLevel, section, this::removeGameEventListenerRegistry))
+-            : super.getListenerRegistry(section);
++        if (this.level instanceof ServerLevel serverLevel) {
++            GameEventListenerRegistry registry = this.gameEventListenerRegistrySections.get(section);
++            return registry != null
++                ? registry
++                : this.gameEventListenerRegistrySections
++                    .computeIfAbsent(section, key -> new EuclideanGameEventListenerRegistry(serverLevel, section, this::removeGameEventListenerRegistry));
++        }
++
++        return super.getListenerRegistry(section);
++    }
++
++    @Override
++    public GameEventListenerRegistry getExistingListenerRegistry(final int section) {
++        GameEventListenerRegistry registry = this.gameEventListenerRegistrySections.get(section);
++        return registry != null ? registry : GameEventListenerRegistry.NOOP;
+     }
+ 
+     @Override
+@@ -280,6 +_,11 @@
+             return null;
+         }
+ 
++        if (net.minecraft.world.level.parallel.WorldUndo.isLogging()) {
++            BlockPos undoPos = pos.immutable();
++            net.minecraft.world.level.parallel.WorldUndo.action(() -> this.undoBlockState(undoPos, oldState));
++        }
++
+         Block newBlock = state.getBlock();
+         this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING).update(localX, y, localZ, state);
+         this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES).update(localX, y, localZ, state);
+@@ -351,6 +_,67 @@
+         return oldState;
+     }
+ 
++    /**
++     * Puts {@code oldState} back at {@code pos} for a rolled back world event, with the bookkeeping
++     * setBlockState does, but no block callbacks: the event's other changes (block entities,
++     * neighbours) are undone by their own log entries.
++     */
++    private void undoBlockState(final BlockPos pos, final BlockState oldState) {
++        int y = pos.getY();
++        LevelChunkSection section = this.getSection(this.getSectionIndex(y));
++        boolean wasEmpty = section.hasOnlyAir();
++        int localX = pos.getX() & 15;
++        int localZ = pos.getZ() & 15;
++        BlockState current = section.setBlockState(localX, y & 15, localZ, oldState);
++        if (current == oldState) {
++            return;
++        }
++
++        this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING).update(localX, y, localZ, oldState);
++        this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES).update(localX, y, localZ, oldState);
++        this.heightmaps.get(Heightmap.Types.OCEAN_FLOOR).update(localX, y, localZ, oldState);
++        this.heightmaps.get(Heightmap.Types.WORLD_SURFACE).update(localX, y, localZ, oldState);
++        boolean isEmpty = section.hasOnlyAir();
++        if (wasEmpty != isEmpty) {
++            this.level.getChunkSource().getLightEngine().updateSectionStatus(pos, isEmpty);
++            this.level.getChunkSource().onSectionEmptinessChanged(this.chunkPos.x(), SectionPos.blockToSectionCoord(y), this.chunkPos.z(), isEmpty);
++        }
++
++        if (LightEngine.hasDifferentLightProperties(current, oldState)) {
++            this.skyLightSources.update(this, localX, y, localZ);
++            this.level.getChunkSource().getLightEngine().checkBlock(pos);
++        }
++
++        this.markUnsaved();
++        this.level.sendBlockUpdated(pos, current, oldState, Block.UPDATE_ALL);
++        this.level.updatePOIOnBlockStateChange(pos, current, oldState);
++    }
++
++    /** Takes back a change to the block entity map at {@code pos} for a rolled back world event. */
++    private void undoBlockEntity(final BlockPos pos, final @Nullable BlockEntity previous, final @Nullable BlockEntity current) {
++        if (current != null && this.blockEntities.get(pos) == current) {
++            this.blockEntities.remove(pos);
++            if (this.level instanceof ServerLevel serverLevel) {
++                this.removeGameEventListener(current, serverLevel);
++            }
++
++            current.setRemoved();
++        }
++
++        if (previous != null) {
++            this.blockEntities.put(pos, previous);
++            if (this.isInLevel()) {
++                if (this.level instanceof ServerLevel serverLevel) {
++                    this.addGameEventListener(previous, serverLevel);
++                }
++
++                this.updateBlockEntityTicker(previous);
++            }
++        } else {
++            this.removeBlockEntityTicker(pos);
++        }
++    }
++
+     @Deprecated
+     @Override
+     public void addEntity(final Entity entity) {
+@@ -394,7 +_,11 @@
+     }
+ 
+     public void addAndRegisterBlockEntity(final BlockEntity blockEntity) {
+-        this.setBlockEntity(blockEntity);
++        this.addAndRegisterBlockEntity(blockEntity, true);
++    }
++
++    private void addAndRegisterBlockEntity(final BlockEntity blockEntity, final boolean undoable) {
++        this.setBlockEntity(blockEntity, undoable);
+         if (this.isInLevel()) {
+             if (this.level instanceof ServerLevel serverLevel) {
+                 this.addGameEventListener(blockEntity, serverLevel);
+@@ -419,6 +_,10 @@
+ 
+     @Override
+     public void setBlockEntity(final BlockEntity blockEntity) {
++        this.setBlockEntity(blockEntity, true);
++    }
++
++    private void setBlockEntity(final BlockEntity blockEntity, final boolean undoable) {
+         BlockPos pos = blockEntity.getBlockPos();
+         BlockState blockState = this.getBlockState(pos);
+         if (!blockState.hasBlockEntity()) {
+@@ -440,7 +_,12 @@
+ 
+             blockEntity.setLevel(this.level);
+             blockEntity.clearRemoved();
+-            BlockEntity previousEntry = this.blockEntities.put(pos.immutable(), blockEntity);
++            BlockPos key = pos.immutable();
++            BlockEntity previousEntry = this.blockEntities.put(key, blockEntity);
++            if (undoable && previousEntry != blockEntity) {
++                net.minecraft.world.level.parallel.WorldUndo.action(() -> this.undoBlockEntity(key, previousEntry, blockEntity));
++            }
++
+             if (previousEntry != null && previousEntry != blockEntity) {
+                 previousEntry.setRemoved();
+             }
+@@ -470,6 +_,8 @@
+         if (this.isInLevel()) {
+             BlockEntity removeThis = this.blockEntities.remove(pos);
+             if (removeThis != null) {
++                BlockPos key = pos.immutable();
++                net.minecraft.world.level.parallel.WorldUndo.action(() -> this.undoBlockEntity(key, removeThis, null));
+                 if (this.level instanceof ServerLevel serverLevel) {
+                     this.removeGameEventListener(removeThis, serverLevel);
+                     serverLevel.debugSynchronizers().dropBlockEntity(pos);
+@@ -497,10 +_,18 @@
+         this.gameEventListenerRegistrySections.remove(sectionY);
+     }
+ 
++    /** Ticking block entities in this chunk, each registered with its own world event timer. */
++    public java.util.Collection<? extends TickingBlockEntity> getBlockEntityTickers() {
++        return this.tickersInLevel.values();
++    }
++
+     private void removeBlockEntityTicker(final BlockPos pos) {
+         LevelChunk.RebindableTickingBlockEntityWrapper ticker = this.tickersInLevel.remove(pos);
+         if (ticker != null) {
+             ticker.rebind(NULL_TICKER);
++            if (this.level instanceof ServerLevel serverLevel) {
++                serverLevel.eventScheduler().onBlockEntityTickerRemoved(pos);
++            }
+         }
+     }
+ 
+@@ -547,6 +_,21 @@
+         this.loaded = loaded;
+     }
+ 
++    public boolean loaded() {
++        return this.loaded;
++    }
++
++    public LevelChunk.EventStream eventStream() {
++        return this.eventStream;
++    }
++
++    /** Coalescing run state for this chunk's world events. See LevelEventScheduler. */
++    public static final class EventStream {
++        public final java.util.concurrent.atomic.AtomicInteger state = new java.util.concurrent.atomic.AtomicInteger();
++        public volatile long requestedTick = Long.MIN_VALUE;
++        public long lastTick = Long.MIN_VALUE;
++    }
++
+     public Level getLevel() {
+         return this.level;
+     }
+@@ -557,32 +_,29 @@
+ 
+     public void postProcessGeneration(final ServerLevel level) {
+         ChunkPos chunkPos = this.getPos();
+-
++        List<BlockPos> positions = new ArrayList<>();
+         for (int sectionIndex = 0; sectionIndex < this.postProcessing.length; sectionIndex++) {
+             ShortList postProcessingSection = this.postProcessing[sectionIndex];
+             if (postProcessingSection != null) {
+                 for (Short packedOffset : postProcessingSection) {
+-                    BlockPos blockPos = ProtoChunk.unpackOffsetCoordinates(packedOffset, this.getSectionYFromSectionIndex(sectionIndex), chunkPos);
+-                    BlockState blockState = this.getBlockState(blockPos);
+-                    FluidState fluidState = blockState.getFluidState();
+-                    if (!fluidState.isEmpty()) {
+-                        fluidState.tick(level, blockPos, blockState);
+-                    }
+-
+-                    if (blockState.getBlock() instanceof LiquidBlock) {
+-                        blockState.tick(level, blockPos, level.getRandom());
+-                    } else {
+-                        BlockState blockStateNew = Block.updateFromNeighbourShapes(blockState, level, blockPos);
+-                        if (blockStateNew != blockState) {
+-                            level.setBlock(blockPos, blockStateNew, Block.UPDATE_NONE | Block.UPDATE_KNOWN_SHAPE);
+-                        }
+-                    }
++                    positions.add(ProtoChunk.unpackOffsetCoordinates(packedOffset, this.getSectionYFromSectionIndex(sectionIndex), chunkPos));
+                 }
+ 
+                 postProcessingSection.clear();
+             }
+         }
+ 
++        // Fluid and shape updates lock blocks. Run on the server thread, a chunk load inside a
++        // command held tens of thousands of block locks that events then waited for in cycles with
++        // it, and the server thread cannot be rolled back. As a world event they can.
++        if (!positions.isEmpty()) {
++            if (net.minecraft.world.level.parallel.WorldTxn.isEnabled()) {
++                level.eventScheduler().submitGlobal(() -> postProcessBlocks(level, positions), "post-processing " + chunkPos);
++            } else {
++                postProcessBlocks(level, positions);
++            }
++        }
++
+         for (BlockPos pos : ImmutableList.copyOf(this.pendingBlockEntities.keySet())) {
+             this.getBlockEntity(pos);
+         }
+@@ -591,6 +_,25 @@
+         this.upgradeData.upgrade(this);
+     }
+ 
++    private static void postProcessBlocks(final ServerLevel level, final List<BlockPos> positions) {
++        for (BlockPos blockPos : positions) {
++            BlockState blockState = level.getBlockState(blockPos);
++            FluidState fluidState = blockState.getFluidState();
++            if (!fluidState.isEmpty()) {
++                fluidState.tick(level, blockPos, blockState);
++            }
++
++            if (blockState.getBlock() instanceof LiquidBlock) {
++                blockState.tick(level, blockPos, level.getRandom());
++            } else {
++                BlockState blockStateNew = Block.updateFromNeighbourShapes(blockState, level, blockPos);
++                if (blockStateNew != blockState) {
++                    level.setBlock(blockPos, blockStateNew, Block.UPDATE_NONE | Block.UPDATE_KNOWN_SHAPE);
++                }
++            }
++        }
++    }
++
+     private @Nullable BlockEntity promotePendingBlockEntity(final BlockPos pos, final CompoundTag tag) {
+         BlockState state = this.getBlockState(pos);
+         BlockEntity blockEntity;
+@@ -607,7 +_,8 @@
+ 
+         if (blockEntity != null) {
+             blockEntity.setLevel(this.level);
+-            this.addAndRegisterBlockEntity(blockEntity);
++            // Loading saved data is not part of the event that asked for it; its pending tag is gone.
++            this.addAndRegisterBlockEntity(blockEntity, false);
+         } else {
+             LOGGER.warn("Tried to load a block entity for block {} but failed at location {}", state, pos);
+         }
+@@ -672,6 +_,9 @@
+     public void clearAllBlockEntities() {
+         this.blockEntities.values().forEach(BlockEntity::setRemoved);
+         this.blockEntities.clear();
++        if (this.level instanceof ServerLevel serverLevel) {
++            this.tickersInLevel.keySet().forEach(serverLevel.eventScheduler()::onBlockEntityTickerRemoved);
++        }
+         this.tickersInLevel.values().forEach(ticker -> ticker.rebind(NULL_TICKER));
+         this.tickersInLevel.clear();
+     }
+@@ -799,7 +_,7 @@
+     }
+ 
+     private static class RebindableTickingBlockEntityWrapper implements TickingBlockEntity {
+-        private TickingBlockEntity ticker;
++        private volatile TickingBlockEntity ticker;
+ 
+         private RebindableTickingBlockEntityWrapper(final TickingBlockEntity ticker) {
+             this.ticker = ticker;

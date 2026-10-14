@@ -1,0 +1,206 @@
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -103,6 +_,8 @@
+ import net.minecraft.world.item.ItemStack;
+ import net.minecraft.world.item.Items;
+ import net.minecraft.world.item.component.CustomData;
++import net.minecraft.world.level.parallel.WorldLock;
++import net.minecraft.world.level.parallel.WorldLocks;
+ import net.minecraft.world.level.BlockGetter;
+ import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.ClipContext;
+@@ -255,6 +_,16 @@
+     private int invulnerableTime;
+     protected boolean firstTick = true;
+     protected final SynchedEntityData entityData;
++    /** Held by the world event updating this entity, or by an event that changes it. */
++    public final WorldLock worldLock = new WorldLock();
++    /** Set while an update for this entity is queued on the world workers. */
++    public final java.util.concurrent.atomic.AtomicBoolean worldTickQueued = new java.util.concurrent.atomic.AtomicBoolean();
++    /**
++     * Set while this entity's own explosion runs (see ServerLevel.explode). Other explosions skip
++     * it: hitting it would wait for its lock, held by that whole explosion, and with a hundred big
++     * fireballs going off together they waited on each other one after another.
++     */
++    public final java.util.concurrent.atomic.AtomicBoolean exploding = new java.util.concurrent.atomic.AtomicBoolean();
+     protected static final EntityDataAccessor<Byte> DATA_SHARED_FLAGS_ID = SynchedEntityData.defineId(Entity.class, EntityDataSerializers.BYTE);
+     protected static final int FLAG_ONFIRE = 0;
+     private static final int FLAG_SHIFT_KEY_DOWN = 1;
+@@ -274,9 +_,17 @@
+     private static final EntityDataAccessor<Integer> DATA_TICKS_FROZEN = SynchedEntityData.defineId(Entity.class, EntityDataSerializers.INT);
+     private EntityInLevelCallback levelCallback = EntityInLevelCallback.NULL;
+     private final VecDeltaCodec packetPositionCodec = new VecDeltaCodec();
++    // Packet flags: set by whoever changes the entity, cleared by the tracker on the server thread.
++    // A lost flag delays one movement packet.
++    @net.minecraft.world.level.parallel.Unowned
+     public boolean needsSync;
++    @net.minecraft.world.level.parallel.Unowned
+     public boolean syncPosition;
++    @net.minecraft.world.level.parallel.Unowned
+     public boolean syncVelocity;
++    // Written by EntitySection under its storage monitor when this entity joins or leaves it.
++    @net.minecraft.world.level.parallel.Unowned
++    private volatile long sectionStamp;
+     public @Nullable PortalProcessor portalProcess;
+     private int portalCooldown;
+     private boolean permanentlyInvulnerable;
+@@ -1915,6 +_,7 @@
+     }
+ 
+     public void push(final Entity entity) {
++        // Pushes race without locks: a push lost to a concurrent update is not visible in play.
+         if (!this.isPassengerOfSameVehicle(entity)) {
+             if (!entity.noPhysics && !this.noPhysics) {
+                 double xa = entity.getX() - this.getX();
+@@ -1968,6 +_,7 @@
+ 
+     @Deprecated
+     public final void hurt(final DamageSource source, final float damage) {
++        WorldLocks.lockEntity(this);
+         if (this.level instanceof ServerLevel serverLevel) {
+             this.hurtServer(serverLevel, source, damage);
+         }
+@@ -1975,6 +_,7 @@
+ 
+     @Deprecated
+     public final boolean hurtOrSimulate(final DamageSource source, final float damage) {
++        WorldLocks.lockEntity(this);
+         return this.level instanceof ServerLevel serverLevel ? this.hurtServer(serverLevel, source, damage) : this.hurtClient(source);
+     }
+ 
+@@ -2562,6 +_,7 @@
+     }
+ 
+     protected void addPassenger(final Entity passenger) {
++        WorldLocks.lockEntity(this);
+         if (passenger.getVehicle() != this) {
+             throw new IllegalStateException("Use x.startRiding(y), not y.addPassenger(x)");
+         }
+@@ -2581,6 +_,7 @@
+     }
+ 
+     protected void removePassenger(final Entity passenger) {
++        WorldLocks.lockEntity(this);
+         if (passenger.getVehicle() == this) {
+             throw new IllegalStateException("Use x.stopRiding(y), not y.removePassenger(x)");
+         }
+@@ -3847,12 +_,16 @@
+         return this.blockPosition;
+     }
+ 
++    @net.minecraft.world.level.parallel.Unowned
+     public BlockState getInBlockState() {
+-        if (this.inBlockState == null) {
+-            this.inBlockState = this.level().getBlockState(this.blockPosition());
++        // Other world workers read this cache while this entity's update clears it; read it once.
++        BlockState state = this.inBlockState;
++        if (state == null) {
++            state = this.level().getBlockState(this.blockPosition());
++            this.inBlockState = state;
+         }
+ 
+-        return this.inBlockState;
++        return state;
+     }
+ 
+     public ChunkPos chunkPosition() {
+@@ -4075,6 +_,19 @@
+ 
+     @Override
+     public final void setRemoved(final Entity.RemovalReason reason) {
++        WorldLocks.lockEntity(this);
++        boolean deferred = false;
++        if (net.minecraft.world.level.parallel.WorldUndo.isLogging()) {
++            if (reason.shouldDestroy()) {
++                // Leaving the level cannot be undone; the entity only looks removed until the event
++                // commits, and a rollback brings it back. It stays locked meanwhile.
++                deferred = true;
++            } else {
++                // Unloading or changing dimension moves the entity elsewhere at once.
++                net.minecraft.world.level.parallel.WorldTxn.makeIrrevocable();
++            }
++        }
++
+         if (this.removalReason == null) {
+             this.removalReason = reason;
+         }
+@@ -4084,14 +_,26 @@
+         }
+ 
+         this.getPassengers().forEach(Entity::stopRiding);
+-        this.levelCallback.onRemove(reason);
+-        this.onRemoval(reason);
++        if (deferred) {
++            net.minecraft.world.level.parallel.WorldTxn.afterCommit(() -> {
++                this.levelCallback.onRemove(reason);
++                this.onRemoval(reason);
++            });
++        } else {
++            this.levelCallback.onRemove(reason);
++            this.onRemoval(reason);
++        }
+     }
+ 
+     protected void unsetRemoved() {
+         this.removalReason = null;
+     }
+ 
++    /** Whether the entity is in a level's entity storage, where other events can reach it. */
++    public boolean hasLevelCallback() {
++        return this.levelCallback != EntityInLevelCallback.NULL;
++    }
++
+     @Override
+     public void setLevelCallback(final EntityInLevelCallback levelCallback) {
+         this.levelCallback = levelCallback;
+@@ -4107,6 +_,50 @@
+     @Override
+     public boolean isAlwaysTicking() {
+         return false;
++    }
++
++    @Override
++    public long sectionStamp() {
++        return this.sectionStamp;
++    }
++
++    @Override
++    @net.minecraft.world.level.parallel.Unowned
++    public void setSectionStamp(final long stamp) {
++        this.sectionStamp = stamp;
++    }
++
++    // Classes that override canBeCollidedWith; every other entity always returns false from it.
++    private static final ClassValue<Boolean> MAY_BE_COLLIDED_WITH = new ClassValue<>() {
++        @Override
++        protected Boolean computeValue(final Class<?> type) {
++            return declaredBelowEntity(type, "canBeCollidedWith");
++        }
++    };
++    // Classes that keep Entity's canCollideWith, which only accepts entities that canBeCollidedWith.
++    private static final ClassValue<Boolean> COLLIDES_ONLY_WITH_HARD_COLLIDERS = new ClassValue<>() {
++        @Override
++        protected Boolean computeValue(final Class<?> type) {
++            return !declaredBelowEntity(type, "canCollideWith");
++        }
++    };
++
++    private static boolean declaredBelowEntity(final Class<?> type, final String method) {
++        try {
++            return type.getMethod(method, Entity.class).getDeclaringClass() != Entity.class;
++        } catch (NoSuchMethodException e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
++    @Override
++    public final boolean mayBeCollidedWith() {
++        return MAY_BE_COLLIDED_WITH.get(this.getClass());
++    }
++
++    /** Whether {@link #canCollideWith} can only be true for entities that {@link #mayBeCollidedWith may be collided with}. */
++    public final boolean collidesOnlyWithHardColliders() {
++        return COLLIDES_ONLY_WITH_HARD_COLLIDERS.get(this.getClass());
+     }
+ 
+     public boolean mayInteract(final ServerLevel level, final BlockPos pos) {

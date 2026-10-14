@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/entity/ai/sensing/NearestVisibleLivingEntitySensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestVisibleLivingEntitySensor.java
+@@ -22,7 +_,7 @@
+         body.getBrain().setMemory(this.getMemoryToSet(), this.getNearestEntity(level, body));
+     }
+ 
+-    private Optional<LivingEntity> getNearestEntity(final ServerLevel level, final LivingEntity body) {
++    protected Optional<LivingEntity> getNearestEntity(final ServerLevel level, final LivingEntity body) {
+         return this.getVisibleEntities(body).flatMap(livingEntities -> livingEntities.findClosest(mob -> this.isMatchingEntity(level, body, mob)));
+     }
+ 

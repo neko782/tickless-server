@@ -1,0 +1,25 @@
+--- a/net/minecraft/core/component/PatchedDataComponentMap.java
++++ b/net/minecraft/core/component/PatchedDataComponentMap.java
+@@ -134,9 +_,20 @@
+     }
+ 
+     private void ensureMapOwnership() {
+-        if (this.copyOnWrite) {
+-            this.patch = new Reference2ObjectArrayMap<>(this.patch);
++        // In an event that can be rolled back, every change works on a fresh copy and the old map is
++        // kept for the undo. The old map may have been shared by copy() since, so it comes back
++        // copy-on-write.
++        boolean undoable = net.minecraft.world.level.parallel.WorldUndo.isLogging();
++        if (this.copyOnWrite || undoable) {
++            Reference2ObjectMap<DataComponentType<?>, Object> old = this.patch;
++            this.patch = new Reference2ObjectArrayMap<>(old);
+             this.copyOnWrite = false;
++            if (undoable) {
++                net.minecraft.world.level.parallel.WorldUndo.action(() -> {
++                    this.patch = old;
++                    this.copyOnWrite = true;
++                });
++            }
+         }
+     }
+ 

@@ -1,0 +1,15 @@
+--- a/net/minecraft/world/entity/ai/sensing/VillagerHostilesSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/VillagerHostilesSensor.java
+@@ -23,6 +_,12 @@
+         .build();
+ 
+     @Override
++    protected java.util.Optional<LivingEntity> getNearestEntity(final ServerLevel level, final LivingEntity body) {
++        return this.getVisibleEntities(body).flatMap(entities -> entities.findClosest(
++            ACCEPTABLE_DISTANCE_FROM_HOSTILES.keySet(), mob -> this.isClose(body, mob)));
++    }
++
++    @Override
+     protected boolean isMatchingEntity(final ServerLevel level, final LivingEntity body, final LivingEntity mob) {
+         return this.isHostile(mob) && this.isClose(body, mob);
+     }

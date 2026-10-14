@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/entity/decoration/ArmorStand.java
++++ b/net/minecraft/world/entity/decoration/ArmorStand.java
+@@ -179,7 +_,7 @@
+     protected void pushEntities() {
+         for (Entity entity : this.level().getEntities(this, this.getBoundingBox(), RIDABLE_MINECARTS)) {
+             if (this.distanceToSqr(entity) <= 0.2) {
+-                entity.push(this);
++                net.minecraft.world.level.parallel.WorldOwnership.racy(() -> entity.push(this));
+             }
+         }
+     }

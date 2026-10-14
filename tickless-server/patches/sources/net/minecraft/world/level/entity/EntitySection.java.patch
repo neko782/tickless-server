@@ -1,0 +1,345 @@
+--- a/net/minecraft/world/level/entity/EntitySection.java
++++ b/net/minecraft/world/level/entity/EntitySection.java
+@@ -1,35 +_,304 @@
+ package net.minecraft.world.level.entity;
+ 
+ import com.mojang.logging.LogUtils;
+-import java.util.Collection;
++import java.util.Arrays;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.LongSupplier;
+ import java.util.stream.Stream;
+ import net.minecraft.util.AbortableIterationConsumer;
+ import net.minecraft.util.ClassInstanceMultiMap;
+ import net.minecraft.util.Continuation;
+ import net.minecraft.util.VisibleForDebug;
+ import net.minecraft.world.phys.AABB;
++import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+ public class EntitySection<T extends EntityAccess> {
+     private static final Logger LOGGER = LogUtils.getLogger();
++    private static final Object[] EMPTY = new Object[0];
+     private final ClassInstanceMultiMap<T> storage;
++    // Entities whose class can ever be collided with like a solid block (see
++    // EntityAccess.mayBeCollidedWith). Almost always empty, so movement collision checks can skip
++    // the section without looking at its entities.
++    private volatile Object[] hardColliders = EMPTY;
+     private Visibility chunkStatus;
++    /** Sections with at least this many entities scan cached bounding boxes instead of each entity. */
++    private static final int BOX_CACHE_MIN_ENTITIES = 12;
++    /**
++     * Changes once per simulation step, and about once per 50 ms while the clock is frozen so
++     * moved entities still show up; {@code null} disables the box cache.
++     */
++    private final @Nullable LongSupplier boxClock;
++    private volatile @Nullable BoxCache boxCache;
++    private final AtomicBoolean rebuildingBoxes = new AtomicBoolean();
++    // Join stamps are unique across sections, so a stamp also tells which section an entity is in.
++    private static final java.util.concurrent.atomic.AtomicLong JOIN_STAMPS = new java.util.concurrent.atomic.AtomicLong();
++    // The stamp of the last entity appended here. Guarded by the storage monitor, which also
++    // orders appends, so entities after a cache snapshot form a tail of later stamps.
++    private long lastJoin;
+ 
+     public EntitySection(final Class<T> entityClass, final Visibility chunkStatus) {
++        this(entityClass, chunkStatus, null);
++    }
++
++    public EntitySection(final Class<T> entityClass, final Visibility chunkStatus, final @Nullable LongSupplier boxClock) {
+         this.chunkStatus = chunkStatus;
++        this.boxClock = boxClock;
+         this.storage = new ClassInstanceMultiMap<>(entityClass);
+     }
+ 
+     public void add(final T entity) {
+-        this.storage.add(entity);
++        synchronized (this.storage) {
++            long stamp = JOIN_STAMPS.incrementAndGet();
++            entity.setSectionStamp(stamp);
++            this.storage.add(entity);
++            this.lastJoin = stamp;
++        }
++
++        if (entity.mayBeCollidedWith()) {
++            synchronized (this) {
++                Object[] current = this.hardColliders;
++                Object[] next = Arrays.copyOf(current, current.length + 1);
++                next[current.length] = entity;
++                this.hardColliders = next;
++            }
++        }
+     }
+ 
+     public boolean remove(final T entity) {
+-        return this.storage.remove(entity);
++        if (entity.mayBeCollidedWith()) {
++            synchronized (this) {
++                Object[] current = this.hardColliders;
++                for (int i = 0; i < current.length; i++) {
++                    if (current[i] == entity) {
++                        Object[] next = new Object[current.length - 1];
++                        System.arraycopy(current, 0, next, 0, i);
++                        System.arraycopy(current, i + 1, next, i, current.length - i - 1);
++                        this.hardColliders = next;
++                        break;
++                    }
++                }
++            }
++        }
++
++        synchronized (this.storage) {
++            // An entity is in one section at a time: moves leave the old section first.
++            if (this.storage.remove(entity)) {
++                entity.setSectionStamp(0L);
++                return true;
++            }
++
++            return false;
++        }
+     }
+ 
+     public Continuation getEntities(final AABB bb, final AbortableIterationConsumer<T> entities) {
+-        for (T entity : this.storage) {
++        Object[] all = this.storage.allArray();
++        return this.visitCached(all, this.cachedBoxes(all), bb, entities, entities);
++    }
++
++    /**
++     * Visits the entities of {@code all} that intersect {@code bb}. Entities from the cache go to
++     * {@code cached}, entities that joined after it was built go to {@code joined}.
++     */
++    private Continuation visitCached(
++        final Object[] all, final @Nullable BoxCache cache, final AABB bb, final AbortableIterationConsumer<T> cached, final AbortableIterationConsumer<T> joined
++    ) {
++        if (cache == null) {
++            return visit(all, bb, joined);
++        }
++        AABB bounds = cache.bounds;
++        if (bb.minX <= bounds.minX && bb.minY <= bounds.minY && bb.minZ <= bounds.minZ
++            && bb.maxX >= bounds.maxX && bb.maxY >= bounds.maxY && bb.maxZ >= bounds.maxZ) {
++            // Every cached box is a candidate. Walking live membership avoids the grid and
++            // duplicate box reads, while still filtering entities that moved out of the query.
++            return visit(all, bb, all == cache.entities ? cached : joined);
++        }
++
++        Object[] bucketed = cache.bucketed;
++        long[] stamps = cache.stamps;
++        double[] boxes = cache.boxes;
++        double minX = bb.minX, minY = bb.minY, minZ = bb.minZ, maxX = bb.maxX, maxY = bb.maxY, maxZ = bb.maxZ;
++        // Bucket by both horizontal coordinates. Expanding by the largest cached box includes
++        // entities whose minimum lies outside the query, including unusually wide entities.
++        int x0 = (int)Math.max(0L, Math.min(cache.sizeX, (long)cell(minX - cache.maxWidth) - cache.minCellX));
++        int x1 = (int)Math.min(cache.sizeX - 1L, Math.max(-1L, (long)cell(maxX) - cache.minCellX));
++        int z0 = (int)Math.max(0L, Math.min(cache.sizeZ, (long)cell(minZ - cache.maxDepth) - cache.minCellZ));
++        int z1 = (int)Math.min(cache.sizeZ - 1L, Math.max(-1L, (long)cell(maxZ) - cache.minCellZ));
++        for (int z = z0; z <= z1; z++) {
++            for (int x = x0; x <= x1; x++) {
++                int bucket = z * cache.sizeX + x;
++                int end = cache.offsets[bucket + 1];
++                for (int i = cache.offsets[bucket], j = i * 6; i < end; i++, j += 6) {
++                    if (boxes[j] < maxX && boxes[j + 3] > minX && boxes[j + 1] < maxY && boxes[j + 4] > minY
++                        && boxes[j + 2] < maxZ && boxes[j + 5] > minZ) {
++                        T entity = (T)bucketed[i];
++                        // A changed stamp means the entity left this section since the build.
++                        if (entity.sectionStamp() == stamps[i] && entity.getBoundingBox().intersects(bb) && cached.accept(entity).shouldAbort()) {
++                            return Continuation.ABORT;
++                        }
++                    }
++                }
++            }
++        }
++
++        // Entities that joined after the build were appended in stamp order: walk back from the
++        // end of the membership snapshot to the first entity still in the cache. A stamp of 0
++        // is an entity that has left since this snapshot.
++        long built = cache.lastJoin;
++        if (all != cache.entities) {
++            for (int i = all.length - 1; i >= 0; i--) {
++                T entity = (T)all[i];
++                long stamp = entity.sectionStamp();
++                if (stamp != 0L && stamp <= built) {
++                    break;
++                }
++
++                if (stamp != 0L && entity.getBoundingBox().intersects(bb) && joined.accept(entity).shouldAbort()) {
++                    return Continuation.ABORT;
++                }
++            }
++        }
++
++        return Continuation.CONTINUE;
++    }
++
++    /**
++     * The entities' bounding boxes as they were at some point during the current simulation step,
++     * bucketed in one-block horizontal cells, or {@code null} when the section is too small to
++     * be worth caching. Crowded sections are scanned once per entity per step, and following a
++     * pointer to each neighbour's box dominated that scan. A box can be up to one step stale,
++     * so a query can miss an entity
++     * that moved into it during the step; every hit is still checked against the entity's current
++     * box. Published arrays are immutable. One reader rebuilds while other readers scan live
++     * entities. The cache is built once per step even while entities join and leave: each cached
++     * entity keeps the join stamp it had, and a different stamp now means it left, while entities
++     * that joined since are the tail of the membership snapshot (see visitCached). Rebuilding on
++     * every membership change cost more than the scans it saved where projectiles come and go.
++     */
++    private @Nullable BoxCache cachedBoxes(final Object[] entities) {
++        LongSupplier clock = this.boxClock;
++        if (clock == null || entities.length < BOX_CACHE_MIN_ENTITIES) {
++            return null;
++        }
++
++        long stamp = clock.getAsLong();
++        BoxCache cache = this.boxCache;
++        if (cache != null && cache.stamp == stamp) {
++            return cache;
++        }
++
++        if (!this.rebuildingBoxes.compareAndSet(false, true)) {
++            return null;
++        }
++        try {
++            // Another reader may have finished between the initial check and acquiring the flag.
++            cache = this.boxCache;
++            if (cache != null && cache.stamp == stamp) {
++                return cache;
++            }
++            Object[] snapshot;
++            long lastJoin;
++            synchronized (this.storage) {
++                snapshot = this.storage.allArray();
++                lastJoin = this.lastJoin;
++            }
++            if (snapshot.length < BOX_CACHE_MIN_ENTITIES) {
++                return null;
++            }
++            cache = buildBoxes(snapshot, lastJoin, stamp);
++            this.boxCache = cache;
++            return cache;
++        } finally {
++            this.rebuildingBoxes.set(false);
++        }
++    }
++
++    private static int cell(final double coordinate) {
++        return net.minecraft.util.Mth.floor(coordinate);
++    }
++
++    private static @Nullable BoxCache buildBoxes(final Object[] entities, final long lastJoin, final long stamp) {
++        int count = entities.length;
++        AABB[] snapshots = new AABB[count];
++        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
++        double maxWidth = 0.0, maxDepth = 0.0;
++        double boundsMinX = Double.POSITIVE_INFINITY, boundsMinY = Double.POSITIVE_INFINITY, boundsMinZ = Double.POSITIVE_INFINITY;
++        double boundsMaxX = Double.NEGATIVE_INFINITY, boundsMaxY = Double.NEGATIVE_INFINITY, boundsMaxZ = Double.NEGATIVE_INFINITY;
++        for (int i = 0; i < count; i++) {
++            AABB box = snapshots[i] = ((EntityAccess)entities[i]).getBoundingBox();
++            int x = cell(box.minX), z = cell(box.minZ);
++            minX = Math.min(minX, x);
++            maxX = Math.max(maxX, x);
++            minZ = Math.min(minZ, z);
++            maxZ = Math.max(maxZ, z);
++            maxWidth = Math.max(maxWidth, box.maxX - box.minX);
++            maxDepth = Math.max(maxDepth, box.maxZ - box.minZ);
++            boundsMinX = Math.min(boundsMinX, box.minX);
++            boundsMinY = Math.min(boundsMinY, box.minY);
++            boundsMinZ = Math.min(boundsMinZ, box.minZ);
++            boundsMaxX = Math.max(boundsMaxX, box.maxX);
++            boundsMaxY = Math.max(boundsMaxY, box.maxY);
++            boundsMaxZ = Math.max(boundsMaxZ, box.maxZ);
++        }
++        long sizeX = (long)maxX - minX + 1, sizeZ = (long)maxZ - minZ + 1;
++        // Malformed or temporarily far-away boxes must not allocate an unbounded grid.
++        if (sizeX > 64 || sizeZ > 64) {
++            return null;
++        }
++        int width = (int)sizeX, depth = (int)sizeZ;
++        int[] offsets = new int[width * depth + 1];
++        for (AABB box : snapshots) {
++            offsets[(cell(box.minZ) - minZ) * width + cell(box.minX) - minX + 1]++;
++        }
++        for (int i = 1; i < offsets.length; i++) {
++            offsets[i] += offsets[i - 1];
++        }
++        int[] next = offsets.clone();
++        Object[] bucketed = new Object[count];
++        long[] stamps = new long[count];
++        double[] boxes = new double[count * 6];
++        for (int i = 0; i < count; i++) {
++            AABB box = snapshots[i];
++            int bucket = (cell(box.minZ) - minZ) * width + cell(box.minX) - minX;
++            int index = next[bucket]++;
++            bucketed[index] = entities[i];
++            // -1 never matches: the entity left (0) or left and joined again since the snapshot.
++            long joined = ((EntityAccess)entities[i]).sectionStamp();
++            stamps[index] = joined != 0L && joined <= lastJoin ? joined : -1L;
++            int j = index * 6;
++            boxes[j] = box.minX;
++            boxes[j + 1] = box.minY;
++            boxes[j + 2] = box.minZ;
++            boxes[j + 3] = box.maxX;
++            boxes[j + 4] = box.maxY;
++            boxes[j + 5] = box.maxZ;
++        }
++        AABB bounds = new AABB(boundsMinX, boundsMinY, boundsMinZ, boundsMaxX, boundsMaxY, boundsMaxZ);
++        return new BoxCache(entities, lastJoin, bucketed, stamps, boxes, offsets, minX, minZ, width, depth, maxWidth, maxDepth, stamp, bounds, new java.util.concurrent.ConcurrentHashMap<>());
++    }
++
++    private record BoxCache(Object[] entities, long lastJoin, Object[] bucketed, long[] stamps, double[] boxes, int[] offsets,
++                            int minCellX, int minCellZ, int sizeX, int sizeZ, double maxWidth, double maxDepth, long stamp, AABB bounds,
++                            java.util.concurrent.ConcurrentHashMap<Class<?>, Boolean> classMatches) {
++        boolean allMatch(final Class<?> type) {
++            return this.classMatches.computeIfAbsent(type, key -> {
++                for (Object entity : this.entities) {
++                    if (!key.isInstance(entity)) return false;
++                }
++                return true;
++            });
++        }
++    }
++
++    /** Like {@link #getEntities(AABB, AbortableIterationConsumer)}, limited to entities that {@link EntityAccess#mayBeCollidedWith may be collided with}. */
++    public Continuation getHardColliders(final AABB bb, final AbortableIterationConsumer<T> entities) {
++        return visit(this.hardColliders, bb, entities);
++    }
++
++    private static <T extends EntityAccess> Continuation visit(final Object[] snapshot, final AABB bb, final AbortableIterationConsumer<T> entities) {
++        for (Object object : snapshot) {
++            T entity = (T)object;
+             if (entity.getBoundingBox().intersects(bb) && entities.accept(entity).shouldAbort()) {
+                 return Continuation.ABORT;
+             }
+@@ -39,13 +_,28 @@
+     }
+ 
+     public <U extends T> Continuation getEntities(final EntityTypeTest<T, U> type, final AABB bb, final AbortableIterationConsumer<? super U> consumer) {
+-        Collection<? extends T> foundEntities = this.storage.find(type.getBaseClass());
+-        if (foundEntities.isEmpty()) {
+-            return Continuation.CONTINUE;
++        Object[] foundEntities = this.storage.findArray(type.getBaseClass());
++        if (foundEntities.length >= BOX_CACHE_MIN_ENTITIES) {
++            // When most of the section matches the type, scanning the cached boxes of all entities is cheaper.
++            Object[] all = this.storage.allArray();
++            if (foundEntities == all || foundEntities.length * 2 >= all.length) {
++                BoxCache cache = this.cachedBoxes(all);
++                AbortableIterationConsumer<T> checked = entity -> {
++                    U maybeEntity = (U)type.tryCast(entity);
++                    return maybeEntity != null ? consumer.accept(maybeEntity) : Continuation.CONTINUE;
++                };
++                if (cache != null && type.isPureClassTest() && cache.allMatch(type.getBaseClass())) {
++                    // The proof belongs to the cache's immutable membership snapshot, so it only
++                    // covers cached entities; entities that joined later are still checked.
++                    return this.visitCached(all, cache, bb, entity -> consumer.accept((U)entity), checked);
++                }
++                return this.visitCached(all, cache, bb, checked, checked);
++            }
+         }
+ 
+-        for (T entity : foundEntities) {
+-            U maybeEntity = (U)type.tryCast(entity);
++        for (Object object : foundEntities) {
++            T entity = (T)object;
++            U maybeEntity = type.isPureClassTest() ? (U)entity : (U)type.tryCast(entity);
+             if (maybeEntity != null && entity.getBoundingBox().intersects(bb) && consumer.accept(maybeEntity).shouldAbort()) {
+                 return Continuation.ABORT;
+             }

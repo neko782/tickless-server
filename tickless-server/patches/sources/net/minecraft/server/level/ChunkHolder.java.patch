@@ -1,0 +1,112 @@
+--- a/net/minecraft/server/level/ChunkHolder.java
++++ b/net/minecraft/server/level/ChunkHolder.java
+@@ -2,6 +_,7 @@
+ 
+ import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
+ import it.unimi.dsi.fastutil.shorts.ShortSet;
++import java.util.ArrayList;
+ import java.util.BitSet;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+@@ -37,7 +_,8 @@
+     private volatile CompletableFuture<ChunkResult<LevelChunk>> tickingChunkFuture = UNLOADED_LEVEL_CHUNK_FUTURE;
+     private volatile CompletableFuture<ChunkResult<LevelChunk>> entityTickingChunkFuture = UNLOADED_LEVEL_CHUNK_FUTURE;
+     private int oldTicketLevel;
+-    private int ticketLevel;
++    // Updated on the server thread, read by world workers through getFullStatus().
++    private volatile int ticketLevel;
+     private int queueLevel;
+     private boolean hasChangedSections;
+     private final @Nullable ShortSet[] changedBlocksPerSection;
+@@ -120,7 +_,7 @@
+         }
+     }
+ 
+-    public boolean blockChanged(final BlockPos pos) {
++    public synchronized boolean blockChanged(final BlockPos pos) {
+         LevelChunk chunk = this.getTickingChunk();
+         if (chunk == null) {
+             return false;
+@@ -139,7 +_,7 @@
+         return !hadChangedSections;
+     }
+ 
+-    public boolean sectionLightChanged(final LightLayer layer, final int chunkY) {
++    public synchronized boolean sectionLightChanged(final LightLayer layer, final int chunkY) {
+         ChunkAccess chunk = this.getChunkIfPresent(ChunkStatus.INITIALIZE_LIGHT);
+         if (chunk == null) {
+             return false;
+@@ -172,6 +_,15 @@
+     }
+ 
+     public void broadcastChanges(final LevelChunk chunk) {
++        this.prepareBroadcastChanges(chunk).forEach(Runnable::run);
++    }
++
++    /**
++     * Prepare update packets while the server thread is not mutating the world.
++     * Returned actions must run on the server thread, in order.
++     */
++    public synchronized List<Runnable> prepareBroadcastChanges(final LevelChunk chunk) {
++        List<Runnable> broadcasts = new ArrayList<>();
+         if (this.hasChangesToBroadcast()) {
+             Level level = chunk.getLevel();
+             if (!this.skyChangedLightSectionFilter.isEmpty() || !this.blockChangedLightSectionFilter.isEmpty()) {
+@@ -180,7 +_,7 @@
+                     ClientboundLightUpdatePacket lightPacket = new ClientboundLightUpdatePacket(
+                         chunk.getPos(), this.lightEngine, this.skyChangedLightSectionFilter, this.blockChangedLightSectionFilter
+                     );
+-                    this.broadcast(borderPlayers, lightPacket);
++                    broadcasts.add(() -> this.broadcast(borderPlayers, lightPacket));
+                 }
+ 
+                 this.skyChangedLightSectionFilter.clear();
+@@ -197,16 +_,27 @@
+                         if (!players.isEmpty()) {
+                             int sectionY = this.levelHeightAccessor.getSectionYFromSectionIndex(sectionIndex);
+                             SectionPos sectionPos = SectionPos.of(chunk.getPos(), sectionY);
++                            LevelChunkSection section = chunk.getSection(sectionIndex);
+                             if (changedBlocks.size() == 1) {
+-                                BlockPos pos = sectionPos.relativeToBlockPos(changedBlocks.iterator().nextShort());
+-                                BlockState state = level.getBlockState(pos);
+-                                this.broadcast(players, new ClientboundBlockUpdatePacket(pos, state));
+-                                this.broadcastBlockEntityIfNeeded(players, level, pos, state);
++                                short packedPos = changedBlocks.iterator().nextShort();
++                                BlockPos pos = sectionPos.relativeToBlockPos(packedPos);
++                                BlockState state = section.getBlockState(
++                                    SectionPos.sectionRelativeX(packedPos), SectionPos.sectionRelativeY(packedPos), SectionPos.sectionRelativeZ(packedPos)
++                                );
++                                Packet<?> packet = new ClientboundBlockUpdatePacket(pos, state);
++                                broadcasts.add(() -> this.broadcast(players, packet));
++                                if (state.hasBlockEntity()) {
++                                    broadcasts.add(() -> this.broadcastBlockEntity(players, level, pos));
++                                }
+                             } else {
+-                                LevelChunkSection section = chunk.getSection(sectionIndex);
+                                 ClientboundSectionBlocksUpdatePacket packet = new ClientboundSectionBlocksUpdatePacket(sectionPos, changedBlocks, section);
+-                                this.broadcast(players, packet);
+-                                packet.runUpdates((pos, state) -> this.broadcastBlockEntityIfNeeded(players, level, pos, state));
++                                broadcasts.add(() -> this.broadcast(players, packet));
++                                packet.runUpdates((pos, state) -> {
++                                    if (state.hasBlockEntity()) {
++                                        BlockPos immutablePos = pos.immutable();
++                                        broadcasts.add(() -> this.broadcastBlockEntity(players, level, immutablePos));
++                                    }
++                                });
+                             }
+                         }
+                     }
+@@ -215,12 +_,8 @@
+                 this.hasChangedSections = false;
+             }
+         }
+-    }
+ 
+-    private void broadcastBlockEntityIfNeeded(final List<ServerPlayer> players, final Level level, final BlockPos pos, final BlockState state) {
+-        if (state.hasBlockEntity()) {
+-            this.broadcastBlockEntity(players, level, pos);
+-        }
++        return broadcasts;
+     }
+ 
+     private void broadcastBlockEntity(final List<ServerPlayer> players, final Level level, final BlockPos blockPos) {

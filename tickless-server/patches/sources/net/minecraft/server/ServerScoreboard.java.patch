@@ -1,0 +1,203 @@
+--- a/net/minecraft/server/ServerScoreboard.java
++++ b/net/minecraft/server/ServerScoreboard.java
+@@ -33,7 +_,7 @@
+         this.server = server;
+     }
+ 
+-    public void load(final ScoreboardSaveData.Packed data) {
++    public synchronized void load(final ScoreboardSaveData.Packed data) {
+         data.objectives().forEach(x$0 -> this.loadObjective(x$0));
+         data.scores().forEach(x$0 -> this.loadPlayerScore(x$0));
+         data.displaySlots().forEach((slot, name) -> {
+@@ -43,12 +_,12 @@
+         data.teams().forEach(x$0 -> this.loadPlayerTeam(x$0));
+     }
+ 
+-    private ScoreboardSaveData.Packed store() {
++    private synchronized ScoreboardSaveData.Packed store() {
+         return new ScoreboardSaveData.Packed(this.packObjectives(), this.packPlayerScores(), this.packDisplaySlots(), this.packPlayerTeams());
+     }
+ 
+     @Override
+-    protected void onScoreChanged(final ScoreHolder owner, final Objective objective, final Score score) {
++    protected synchronized void onScoreChanged(final ScoreHolder owner, final Objective objective, final Score score) {
+         super.onScoreChanged(owner, objective, score);
+         if (this.trackedObjectives.contains(objective)) {
+             this.server
+@@ -68,13 +_,13 @@
+     }
+ 
+     @Override
+-    protected void onScoreLockChanged(final ScoreHolder owner, final Objective objective) {
++    protected synchronized void onScoreLockChanged(final ScoreHolder owner, final Objective objective) {
+         super.onScoreLockChanged(owner, objective);
+         this.setDirty();
+     }
+ 
+     @Override
+-    public void onPlayerRemoved(final ScoreHolder player) {
++    public synchronized void onPlayerRemoved(final ScoreHolder player) {
+         super.onPlayerRemoved(player);
+         if (!this.trackedObjectives.isEmpty()) {
+             this.server.getPlayerList().broadcastAll(new ClientboundResetScorePacket(player.getScoreboardName(), null));
+@@ -84,7 +_,7 @@
+     }
+ 
+     @Override
+-    public void onPlayerScoreRemoved(final ScoreHolder player, final Objective objective) {
++    public synchronized void onPlayerScoreRemoved(final ScoreHolder player, final Objective objective) {
+         super.onPlayerScoreRemoved(player, objective);
+         if (this.trackedObjectives.contains(objective)) {
+             this.server.getPlayerList().broadcastAll(new ClientboundResetScorePacket(player.getScoreboardName(), objective.getName()));
+@@ -94,7 +_,7 @@
+     }
+ 
+     @Override
+-    public void setDisplayObjective(final DisplaySlot slot, final @Nullable Objective objective) {
++    public synchronized void setDisplayObjective(final DisplaySlot slot, final @Nullable Objective objective) {
+         Objective old = this.getDisplayObjective(slot);
+         super.setDisplayObjective(slot, objective);
+         if (old != objective && old != null) {
+@@ -117,7 +_,7 @@
+     }
+ 
+     @Override
+-    public boolean addPlayerToTeam(final String player, final PlayerTeam team) {
++    public synchronized boolean addPlayerToTeam(final String player, final PlayerTeam team) {
+         if (super.addPlayerToTeam(player, team)) {
+             this.server
+                 .getPlayerList()
+@@ -131,7 +_,7 @@
+     }
+ 
+     @Override
+-    public void removePlayerFromTeam(final String player, final PlayerTeam team) {
++    public synchronized void removePlayerFromTeam(final String player, final PlayerTeam team) {
+         super.removePlayerFromTeam(player, team);
+         this.server.getPlayerList().broadcastAll(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, player, ClientboundSetPlayerTeamPacket.Action.REMOVE));
+         this.updatePlayerWaypoint(player);
+@@ -139,13 +_,13 @@
+     }
+ 
+     @Override
+-    public void onObjectiveAdded(final Objective objective) {
++    public synchronized void onObjectiveAdded(final Objective objective) {
+         super.onObjectiveAdded(objective);
+         this.setDirty();
+     }
+ 
+     @Override
+-    public void onObjectiveChanged(final Objective objective) {
++    public synchronized void onObjectiveChanged(final Objective objective) {
+         super.onObjectiveChanged(objective);
+         if (this.trackedObjectives.contains(objective)) {
+             this.server.getPlayerList().broadcastAll(new ClientboundSetObjectivePacket(objective, ClientboundSetObjectivePacket.METHOD_CHANGE));
+@@ -155,7 +_,7 @@
+     }
+ 
+     @Override
+-    public void onObjectiveRemoved(final Objective objective) {
++    public synchronized void onObjectiveRemoved(final Objective objective) {
+         super.onObjectiveRemoved(objective);
+         if (this.trackedObjectives.contains(objective)) {
+             this.stopTrackingObjective(objective);
+@@ -165,14 +_,14 @@
+     }
+ 
+     @Override
+-    public void onTeamAdded(final PlayerTeam team) {
++    public synchronized void onTeamAdded(final PlayerTeam team) {
+         super.onTeamAdded(team);
+         this.server.getPlayerList().broadcastAll(ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, true));
+         this.setDirty();
+     }
+ 
+     @Override
+-    public void onTeamChanged(final PlayerTeam team) {
++    public synchronized void onTeamChanged(final PlayerTeam team) {
+         super.onTeamChanged(team);
+         this.server.getPlayerList().broadcastAll(ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, false));
+         this.updateTeamWaypoints(team);
+@@ -180,25 +_,25 @@
+     }
+ 
+     @Override
+-    public void onTeamRemoved(final PlayerTeam team) {
++    public synchronized void onTeamRemoved(final PlayerTeam team) {
+         super.onTeamRemoved(team);
+         this.server.getPlayerList().broadcastAll(ClientboundSetPlayerTeamPacket.createRemovePacket(team));
+         this.updateTeamWaypoints(team);
+         this.setDirty();
+     }
+ 
+-    protected void setDirty() {
++    protected synchronized void setDirty() {
+         this.dirty = true;
+     }
+ 
+-    public void storeToSaveDataIfDirty(final ScoreboardSaveData saveData) {
++    public synchronized void storeToSaveDataIfDirty(final ScoreboardSaveData saveData) {
+         if (this.dirty) {
+             this.dirty = false;
+             saveData.setData(this.store());
+         }
+     }
+ 
+-    public List<Packet<?>> getStartTrackingPackets(final Objective objective) {
++    public synchronized List<Packet<?>> getStartTrackingPackets(final Objective objective) {
+         List<Packet<?>> packets = Lists.newArrayList();
+         packets.add(new ClientboundSetObjectivePacket(objective, ClientboundSetObjectivePacket.METHOD_ADD));
+ 
+@@ -219,7 +_,7 @@
+         return packets;
+     }
+ 
+-    public void startTrackingObjective(final Objective objective) {
++    public synchronized void startTrackingObjective(final Objective objective) {
+         List<Packet<?>> packets = this.getStartTrackingPackets(objective);
+ 
+         for (ServerPlayer player : this.server.getPlayerList().getPlayers()) {
+@@ -231,7 +_,7 @@
+         this.trackedObjectives.add(objective);
+     }
+ 
+-    public List<Packet<?>> getStopTrackingPackets(final Objective objective) {
++    public synchronized List<Packet<?>> getStopTrackingPackets(final Objective objective) {
+         List<Packet<?>> packets = Lists.newArrayList();
+         packets.add(new ClientboundSetObjectivePacket(objective, ClientboundSetObjectivePacket.METHOD_REMOVE));
+ 
+@@ -244,7 +_,7 @@
+         return packets;
+     }
+ 
+-    public void stopTrackingObjective(final Objective objective) {
++    public synchronized void stopTrackingObjective(final Objective objective) {
+         List<Packet<?>> packets = this.getStopTrackingPackets(objective);
+ 
+         for (ServerPlayer player : this.server.getPlayerList().getPlayers()) {
+@@ -256,7 +_,7 @@
+         this.trackedObjectives.remove(objective);
+     }
+ 
+-    public int getObjectiveDisplaySlotCount(final Objective objective) {
++    public synchronized int getObjectiveDisplaySlotCount(final Objective objective) {
+         int count = 0;
+ 
+         for (DisplaySlot slot : DisplaySlot.values()) {
+@@ -268,14 +_,14 @@
+         return count;
+     }
+ 
+-    private void updatePlayerWaypoint(final String player) {
++    private synchronized void updatePlayerWaypoint(final String player) {
+         ServerPlayer serverPlayer = this.server.getPlayerList().getPlayerByName(player);
+         if (serverPlayer != null) {
+             serverPlayer.level().getWaypointManager().remakeConnections(serverPlayer);
+         }
+     }
+ 
+-    private void updateTeamWaypoints(final PlayerTeam team) {
++    private synchronized void updateTeamWaypoints(final PlayerTeam team) {
+         for (ServerLevel level : this.server.getAllLevels()) {
+             team.getPlayers()
+                 .stream()

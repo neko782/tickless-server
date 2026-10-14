@@ -1,0 +1,30 @@
+--- a/net/minecraft/server/ServerTickRateManager.java
++++ b/net/minecraft/server/ServerTickRateManager.java
+@@ -74,6 +_,7 @@
+         this.remainingSprintTicks = time;
+         this.previousIsFrozen = this.isFrozen();
+         this.setFrozen(false);
++        this.server.wakeSimulation();
+         return interrupted;
+     }
+ 
+@@ -91,7 +_,6 @@
+             .sendSuccess(() -> Component.translatable("commands.tick.sprint.report", ticksPerSecond, millisecondsPerTick), true);
+         this.remainingSprintTicks = 0L;
+         this.setFrozen(this.previousIsFrozen);
+-        this.server.onTickRateChanged();
+     }
+ 
+     public boolean checkShouldSprintThisTick() {
+@@ -114,7 +_,10 @@
+     @Override
+     public void setTickRate(final float rate) {
+         super.setTickRate(rate);
+-        this.server.onTickRateChanged();
++        this.server.wakeSimulation();
++        for (net.minecraft.server.level.ServerLevel level : this.server.getAllLevels()) {
++            level.eventScheduler().onTickRateChanged();
++        }
+         this.updateStateToClients();
+     }
+ 

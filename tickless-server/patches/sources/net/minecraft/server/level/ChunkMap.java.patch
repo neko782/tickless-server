@@ -1,0 +1,220 @@
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -71,6 +_,7 @@
+ import net.minecraft.util.profiling.ProfilerFiller;
+ import net.minecraft.util.thread.BlockableEventLoop;
+ import net.minecraft.util.thread.ConsecutiveExecutor;
++import net.minecraft.util.thread.TaskScheduler;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.EntityType;
+ import net.minecraft.world.entity.UpdateInterval;
+@@ -96,6 +_,8 @@
+ import net.minecraft.world.level.chunk.storage.SerializableChunkData;
+ import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
+ import net.minecraft.world.level.entity.ChunkStatusUpdateListener;
++import net.minecraft.world.level.parallel.ServerThreadHelpers;
++import net.minecraft.world.entity.decoration.ItemFrame;
+ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+ import net.minecraft.world.level.levelgen.NoiseRouterData;
+@@ -146,10 +_,13 @@
+     private final Long2ByteMap chunkTypeCache = new Long2ByteOpenHashMap();
+     private final Long2LongMap nextChunkSaveTime = new Long2LongOpenHashMap();
+     private final LongSet chunksToEagerlySave = new LongLinkedOpenHashSet();
++    // Chunks become unsaved on world workers; the server thread moves them into the eager-save set.
++    private final java.util.Queue<Long> chunksBecameUnsaved = new java.util.concurrent.ConcurrentLinkedQueue<>();
+     private final Queue<Runnable> unloadQueue = Queues.newConcurrentLinkedQueue();
+     private final AtomicInteger activeChunkWrites = new AtomicInteger();
+     private int serverViewDistance;
+     private final WorldGenContext worldGenContext;
++    private final ChunkNeighborhoodLocks featureLocks = new ChunkNeighborhoodLocks();
+ 
+     public ChunkMap(
+         final ServerLevel level,
+@@ -186,10 +_,10 @@
+ 
+         this.chunkGeneratorState = generator.createState(registryAccess.lookupOrThrow(Registries.STRUCTURE_SET), this.randomState, levelSeed);
+         this.mainThreadExecutor = mainThreadExecutor;
+-        ConsecutiveExecutor worldgen = new ConsecutiveExecutor(executor, "worldgen");
++        TaskScheduler<Runnable> worldgen = TaskScheduler.wrapExecutor("worldgen", executor);
+         this.chunkStatusListener = chunkStatusListener;
+         ConsecutiveExecutor light = new ConsecutiveExecutor(executor, "light");
+-        this.worldgenTaskDispatcher = new ChunkTaskDispatcher(worldgen, executor);
++        this.worldgenTaskDispatcher = new ParallelChunkTaskDispatcher(worldgen, executor, Util.maxAllowedExecutorThreads());
+         this.lightTaskDispatcher = new ChunkTaskDispatcher(light, executor);
+         this.lightEngine = new ThreadedLevelLightEngine(chunkGetter, this, this.level.dimensionType().hasSkyLight(), light, this.lightTaskDispatcher);
+         this.distanceManager = new ChunkMap.DistanceManager(ticketStorage, executor, mainThreadExecutor);
+@@ -208,7 +_,7 @@
+     }
+ 
+     private void setChunkUnsaved(final ChunkPos chunkPos) {
+-        this.chunksToEagerlySave.add(chunkPos.pack());
++        this.chunksBecameUnsaved.add(chunkPos.pack());
+     }
+ 
+     protected ChunkGenerator generator() {
+@@ -469,6 +_,39 @@
+             || this.distanceManager.hasTickets();
+     }
+ 
++    /** The kinds of work {@link #hasWork} is waiting for, for shutdown diagnostics. */
++    public String describeWork() {
++        List<String> work = new ArrayList<>();
++        if (this.lightEngine.hasLightWork()) {
++            work.add("light");
++        }
++        if (!this.pendingUnloads.isEmpty()) {
++            work.add(this.pendingUnloads.size() + " pending unloads");
++        }
++        if (!this.updatingChunkMap.isEmpty()) {
++            work.add(this.updatingChunkMap.size() + " chunk holders");
++        }
++        if (this.poiManager.hasWork()) {
++            work.add("poi");
++        }
++        if (!this.toDrop.isEmpty()) {
++            work.add(this.toDrop.size() + " to drop");
++        }
++        if (!this.unloadQueue.isEmpty()) {
++            work.add("unload queue");
++        }
++        if (this.worldgenTaskDispatcher.hasWork()) {
++            work.add("worldgen tasks");
++        }
++        if (this.lightTaskDispatcher.hasWork()) {
++            work.add("light tasks");
++        }
++        if (this.distanceManager.hasTickets()) {
++            work.add("tickets");
++        }
++        return String.join(", ", work);
++    }
++
+     private void processUnloads(final BooleanSupplier haveTime) {
+         for (LongIterator iterator = this.toDrop.iterator(); iterator.hasNext(); iterator.remove()) {
+             long pos = iterator.nextLong();
+@@ -495,6 +_,11 @@
+     private void saveChunksEagerly(final BooleanSupplier haveTime) {
+         long now = Util.getMillis();
+         int eagerlySavedCount = 0;
++        Long unsaved;
++        while ((unsaved = this.chunksBecameUnsaved.poll()) != null) {
++            this.chunksToEagerlySave.add(unsaved.longValue());
++        }
++
+         LongIterator iterator = this.chunksToEagerlySave.iterator();
+ 
+         while (eagerlySavedCount < 20 && this.activeChunkWrites.get() < 128 && haveTime.getAsBoolean() && iterator.hasNext()) {
+@@ -636,6 +_,17 @@
+             if (centerChunk == null) {
+                 throw new IllegalStateException("Parent chunk missing");
+             } else {
++                if (step.targetStatus() == ChunkStatus.FEATURES) {
++                    return this.featureLocks.withFeatureNeighborhood(pos, () -> {
++                        CompletableFuture<ChunkAccess> result = step.apply(this.worldGenContext, cache, centerChunk);
++                        if (!result.isDone()) {
++                            throw new IllegalStateException("Feature generation must finish before releasing its chunk neighborhood");
++                        }
++
++                        return result;
++                    });
++                }
++
+                 return step.apply(this.worldGenContext, cache, centerChunk);
+             }
+         } catch (Exception e) {
+@@ -1038,9 +_,10 @@
+         boolean wasIgnored = this.playerMap.ignoredOrUnknown(player);
+         if (added) {
+             this.playerMap.addPlayer(player, ignored);
+-            this.updatePlayerPos(player);
++            SectionPos pos = SectionPos.of(player);
++            this.updatePlayerPos(player, pos);
+             if (!ignored) {
+-                this.distanceManager.addPlayer(SectionPos.of(player), player);
++                this.distanceManager.addPlayer(pos, player);
+             }
+ 
+             player.setChunkTrackingView(ChunkTrackingView.EMPTY);
+@@ -1056,8 +_,11 @@
+         }
+     }
+ 
+-    private void updatePlayerPos(final ServerPlayer player) {
+-        SectionPos pos = SectionPos.of(player);
++    // The section a player is registered under. Player lanes move players on world workers while
++    // this runs on the server thread, so the caller passes the section it registered, not a second
++    // read of the position: a move in between left the player recorded under a section the
++    // distance manager never had, and the next move threw removing it.
++    private void updatePlayerPos(final ServerPlayer player, final SectionPos pos) {
+         player.setLastSectionPos(pos);
+     }
+ 
+@@ -1076,7 +_,7 @@
+         boolean ignored = this.skipPlayer(player);
+         boolean positionChanged = oldSection.asLong() != newSection.asLong();
+         if (positionChanged || wasIgnored != ignored) {
+-            this.updatePlayerPos(player);
++            this.updatePlayerPos(player, newSection);
+             if (!wasIgnored) {
+                 this.distanceManager.removePlayer(oldSection, player);
+             }
+@@ -1188,6 +_,8 @@
+ 
+         List<ServerPlayer> movedPlayers = Lists.newArrayList();
+         List<ServerPlayer> players = this.level.players();
++        List<ServerEntity> changed = new ArrayList<>(this.entityMap.size());
++        List<ServerEntity> changedOnServerThread = new ArrayList<>();
+ 
+         for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
+             SectionPos oldPos = trackedEntity.lastSectionPos;
+@@ -1203,9 +_,18 @@
+             }
+ 
+             if (sectionPosChanged || trackedEntity.entity.needsSync || this.distanceManager.inEntityTickingRange(newPos.chunk().pack())) {
+-                trackedEntity.serverEntity.sendChanges();
++                // Item frames tick shared map data for every player; players stay with their connection's thread.
++                if (trackedEntity.entity instanceof ItemFrame || trackedEntity.entity instanceof ServerPlayer) {
++                    changedOnServerThread.add(trackedEntity.serverEntity);
++                } else {
++                    changed.add(trackedEntity.serverEntity);
++                }
+             }
+         }
++
++        // Each entity's changes are independent, and tracking players only change above.
++        ServerThreadHelpers.forEach(changed, ServerEntity::sendChanges);
++        changedOnServerThread.forEach(ServerEntity::sendChanges);
+ 
+         if (!movedPlayers.isEmpty()) {
+             for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
+@@ -1276,6 +_,17 @@
+ 
+     void onFullChunkStatusChange(final ChunkPos pos, final FullChunkStatus status) {
+         this.chunkStatusListener.onChunkStatusChange(pos, status);
++        if (status.isOrAfter(FullChunkStatus.BLOCK_TICKING)) {
++            // Promotions run before the visible snapshot necessarily catches up
++            // with a new/replaced holder. Use the current server-thread map.
++            ChunkHolder holder = this.updatingChunkMap.get(pos.pack());
++            LevelChunk chunk = holder != null ? holder.getTickingChunk() : null;
++            if (chunk != null) {
++                this.level.eventScheduler().onChunkTickingStart(chunk);
++            }
++        } else {
++            this.level.eventScheduler().onChunkTickingEnd(pos.pack());
++        }
+     }
+ 
+     public void waitForLightBeforeSending(final ChunkPos centerChunk, final int chunkRadius) {
+@@ -1347,6 +_,11 @@
+             for (ServerPlayerConnection connection : this.seenBy) {
+                 connection.send(packet);
+             }
++        }
++
++        @Override
++        public boolean hasTrackingPlayers() {
++            return !this.seenBy.isEmpty();
+         }
+ 
+         @Override

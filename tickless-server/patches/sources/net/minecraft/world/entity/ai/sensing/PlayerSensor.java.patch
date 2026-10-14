@@ -1,0 +1,19 @@
+--- a/net/minecraft/world/entity/ai/sensing/PlayerSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/PlayerSensor.java
+@@ -1,5 +_,6 @@
+ package net.minecraft.world.entity.ai.sensing;
+ 
++import net.minecraft.world.level.parallel.SnapshotSort;
+ import com.google.common.collect.ImmutableSet;
+ import java.util.Comparator;
+ import java.util.List;
+@@ -30,8 +_,8 @@
+             .stream()
+             .filter(EntitySelector.NO_SPECTATORS)
+             .filter(player -> body.closerThan(player, this.getFollowDistance(body)))
+-            .sorted(Comparator.comparingDouble(body::distanceToSqr))
+             .collect(Collectors.toList());
++        SnapshotSort.sortByKey(players, body::distanceToSqr);
+         Brain<?> brain = body.getBrain();
+         brain.setMemory(MemoryModuleType.NEAREST_PLAYERS, players);
+         List<Player> visiblePlayers = players.stream().filter(livingEntity -> isEntityTargetable(level, body, livingEntity)).collect(Collectors.toList());

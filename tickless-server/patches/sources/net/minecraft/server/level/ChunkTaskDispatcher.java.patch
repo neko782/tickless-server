@@ -1,0 +1,15 @@
+--- a/net/minecraft/server/level/ChunkTaskDispatcher.java
++++ b/net/minecraft/server/level/ChunkTaskDispatcher.java
+@@ -17,9 +_,9 @@
+ public class ChunkTaskDispatcher implements ChunkHolder.LevelChangeListener, AutoCloseable {
+     public static final int DISPATCHER_PRIORITY_COUNT = 4;
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final ChunkTaskPriorityQueue queue;
+-    private final TaskScheduler<Runnable> executor;
+-    private final PriorityConsecutiveExecutor dispatcher;
++    protected final ChunkTaskPriorityQueue queue;
++    protected final TaskScheduler<Runnable> executor;
++    protected final PriorityConsecutiveExecutor dispatcher;
+     protected boolean sleeping;
+ 
+     public ChunkTaskDispatcher(final TaskScheduler<Runnable> executor, final Executor dispatcherExecutor) {

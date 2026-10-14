@@ -1,0 +1,20 @@
+gamerule spawn_mobs false
+gamerule advance_time false
+forceload add -32 -32 31 31
+sleep 5
+fill -32 199 -32 31 199 31 minecraft:stone
+setworldspawn 0 200 0
+gamerule respawn_radius 0
+summon minecraft:armor_stand 0 200 0 {UUID:[I;1,2,3,4],Tags:["tracker_probe"],NoGravity:1b,Invulnerable:1b,CustomName:{text:"old"}}
+sleep 2
+tp @e[tag=tracker_probe] 8.25 200 8.25 90 30
+data merge entity @e[tag=tracker_probe,limit=1] {CustomName:{text:"fresh"},CustomNameVisible:1b}
+sleep 2
+bots 1 8
+sleep 12
+tp @e[tag=tracker_probe] -8.25 200 -8.25 180 0
+data merge entity @e[tag=tracker_probe,limit=1] {CustomName:{text:"rejoined"}}
+sleep 2
+bots 1 8
+sleep 12
+execute if entity @e[tag=tracker_probe]

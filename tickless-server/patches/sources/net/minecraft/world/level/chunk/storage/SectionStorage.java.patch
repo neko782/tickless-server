@@ -1,0 +1,187 @@
+--- a/net/minecraft/world/level/chunk/storage/SectionStorage.java
++++ b/net/minecraft/world/level/chunk/storage/SectionStorage.java
+@@ -44,8 +_,10 @@
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private static final String SECTIONS_TAG = "Sections";
+     private final SimpleRegionStorage simpleRegionStorage;
+-    private final Long2ObjectMap<Optional<R>> storage = new Long2ObjectOpenHashMap<>();
+-    private final LongLinkedOpenHashSet dirtyChunks = new LongLinkedOpenHashSet();
++    private boolean closed;
++    // Read and marked dirty by world workers, saved by the server thread.
++    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<Optional<R>> storage = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
++    private final java.util.Set<Long> dirtyChunks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+     private final Codec<P> codec;
+     private final Function<R, P> packer;
+     private final BiFunction<P, Runnable, R> unpacker;
+@@ -53,9 +_,11 @@
+     private final RegistryAccess registryAccess;
+     private final ChunkIOErrorReporter errorReporter;
+     protected final LevelHeightAccessor levelHeightAccessor;
+-    private final LongSet loadedChunks = new LongOpenHashSet();
++    private final java.util.Set<Long> loadedChunks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+     private final Long2ObjectMap<CompletableFuture<Optional<SectionStorage.PackedChunk<P>>>> pendingLoads = new Long2ObjectOpenHashMap<>();
+     private final Object loadLock = new Object();
++    private final Object[] creationLocks = java.util.stream.IntStream.range(0, 64).mapToObj(i -> new Object()).toArray();
++    private final Long2ObjectMap<CompletableFuture<Void>> unpacking = new Long2ObjectOpenHashMap<>();
+ 
+     public SectionStorage(
+         final SimpleRegionStorage simpleRegionStorage,
+@@ -78,10 +_,10 @@
+     }
+ 
+     protected void tick(final BooleanSupplier haveTime) {
+-        LongIterator iterator = this.dirtyChunks.iterator();
++        java.util.Iterator<Long> iterator = this.dirtyChunks.iterator();
+ 
+         while (iterator.hasNext() && haveTime.getAsBoolean()) {
+-            ChunkPos chunkPos = ChunkPos.unpack(iterator.nextLong());
++            ChunkPos chunkPos = ChunkPos.unpack(iterator.next());
+             iterator.remove();
+             this.writeChunk(chunkPos);
+         }
+@@ -98,6 +_,11 @@
+                 Optional<SectionStorage.PackedChunk<P>> chunk = entry.getValue().getNow(null);
+                 if (chunk != null) {
+                     long chunkKey = entry.getLongKey();
++                    if (this.unpacking.containsKey(chunkKey)) {
++                        // A synchronous reader owns this load. Unpacking it twice would replace
++                        // its section objects and lose changes made through the first instance.
++                        continue;
++                    }
+                     this.unpackChunk(ChunkPos.unpack(chunkKey), chunk.orElse(null));
+                     iterator.remove();
+                     this.loadedChunks.add(chunkKey);
+@@ -107,9 +_,10 @@
+     }
+ 
+     public void flushAll() {
+-        if (!this.dirtyChunks.isEmpty()) {
+-            this.dirtyChunks.forEach(pos -> this.writeChunk(ChunkPos.unpack(pos)));
+-            this.dirtyChunks.clear();
++        for (java.util.Iterator<Long> iterator = this.dirtyChunks.iterator(); iterator.hasNext(); ) {
++            long pos = iterator.next();
++            iterator.remove();
++            this.writeChunk(ChunkPos.unpack(pos));
+         }
+     }
+ 
+@@ -150,14 +_,19 @@
+             throw (IllegalArgumentException)Util.pauseInIde(new IllegalArgumentException("sectionPos out of bounds"));
+         }
+ 
+-        Optional<R> r = this.getOrLoad(sectionPos);
+-        if (r.isPresent()) {
+-            return r.get();
+-        }
++        long chunkKey = ChunkPos.pack(SectionPos.x(sectionPos), SectionPos.z(sectionPos));
++        Object creationLock = this.creationLocks[(int)it.unimi.dsi.fastutil.HashCommon.mix(chunkKey) & 63];
++        synchronized (creationLock) {
++            Optional<R> r = this.getOrLoad(sectionPos);
++            if (r.isPresent()) {
++                return r.get();
++            }
+ 
+-        R newR = this.factory.apply(() -> this.setDirty(sectionPos));
+-        this.storage.put(sectionPos, Optional.of(newR));
+-        return newR;
++            R newR = this.factory.apply(() -> this.setDirty(sectionPos));
++            this.storage.put(sectionPos, Optional.of(newR));
++            this.onSectionCreated(sectionPos);
++            return newR;
++        }
+     }
+ 
+     public CompletableFuture<?> prefetch(final ChunkPos chunkPos) {
+@@ -172,17 +_,38 @@
+     private void unpackChunk(final ChunkPos chunkPos) {
+         long chunkKey = chunkPos.pack();
+         CompletableFuture<Optional<SectionStorage.PackedChunk<P>>> future;
++        CompletableFuture<Void> unpacked;
+         synchronized (this.loadLock) {
+             if (!this.loadedChunks.add(chunkKey)) {
+-                return;
+-            }
+-
+-            future = this.pendingLoads.computeIfAbsent(chunkKey, k -> this.tryRead(chunkPos));
+-        }
+-
+-        this.unpackChunk(chunkPos, future.join().orElse(null));
+-        synchronized (this.loadLock) {
+-            this.pendingLoads.remove(chunkKey);
++                // Another world worker may still be unpacking this chunk; wait for it to finish.
++                CompletableFuture<Void> inProgress = this.unpacking.get(chunkKey);
++                if (inProgress != null) {
++                    future = null;
++                    unpacked = inProgress;
++                } else {
++                    return;
++                }
++            } else {
++                future = this.pendingLoads.computeIfAbsent(chunkKey, k -> this.tryRead(chunkPos));
++                unpacked = new CompletableFuture<>();
++                this.unpacking.put(chunkKey, unpacked);
++            }
++        }
++
++        if (future == null) {
++            unpacked.join();
++            return;
++        }
++
++        try {
++            this.unpackChunk(chunkPos, future.join().orElse(null));
++        } finally {
++            synchronized (this.loadLock) {
++                this.pendingLoads.remove(chunkKey);
++                this.unpacking.remove(chunkKey);
++            }
++
++            unpacked.complete(null);
+         }
+     }
+ 
+@@ -190,9 +_,10 @@
+         RegistryOps<Tag> registryOps = this.registryAccess.createSerializationContext(NbtOps.INSTANCE);
+         return this.simpleRegionStorage
+             .read(chunkPos)
+-            .thenApplyAsync(
+-                result -> result.map(tag -> SectionStorage.PackedChunk.parse(this.codec, registryOps, tag, this.simpleRegionStorage, this.levelHeightAccessor)),
+-                Util.backgroundExecutor().forName("parseSection")
++            // Parse on the completing thread. Threads that lose a race to load the same chunk wait
++            // for the winner, and they may be background workers themselves.
++            .thenApply(
++                result -> result.map(tag -> SectionStorage.PackedChunk.parse(this.codec, registryOps, tag, this.simpleRegionStorage, this.levelHeightAccessor))
+             )
+             .exceptionally(throwable -> {
+                 if (throwable instanceof CompletionException) {
+@@ -279,6 +_,9 @@
+     protected void onSectionLoad(final long sectionPos) {
+     }
+ 
++    protected void onSectionCreated(final long sectionPos) {
++    }
++
+     protected void setDirty(final long sectionPos) {
+         Optional<R> r = this.storage.get(sectionPos);
+         if (r != null && !r.isEmpty()) {
+@@ -295,8 +_,18 @@
+     }
+ 
+     @Override
+-    public void close() throws IOException {
+-        this.simpleRegionStorage.close();
++    public synchronized void close() throws IOException {
++        if (this.closed) {
++            return;
++        }
++        this.closed = true;
++        try {
++            // flushAll queues writes; shutting the worker down before it accepts them can
++            // silently discard saves. Complete outstanding requests before requesting shutdown.
++            this.simpleRegionStorage.synchronize(true).join();
++        } finally {
++            this.simpleRegionStorage.close();
++        }
+     }
+ 
+     private record PackedChunk<T>(Int2ObjectMap<T> sectionsByY, boolean versionChanged) {

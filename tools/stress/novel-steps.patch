@@ -1,0 +1,15 @@
+--- a/src/main/java/net/minecraft/server/level/LevelEventScheduler.java
++++ b/src/main/java/net/minecraft/server/level/LevelEventScheduler.java
+@@ -39,2 +39,4 @@
+ public final class LevelEventScheduler {
++    /** Recorded by benchmark manifests so incompatible passenger counters cannot be compared. */
++    public static final String ENTITY_STEP_METRIC = "committed-entities-and-passengers-v2";
+     private static final Logger LOGGER = LogUtils.getLogger();
+@@ -660,4 +662,5 @@
+                 this.level.tickEntityEvent(entity);
+-            }, entity) && entity.tickCount != before) {
+-                this.completedEntitySteps.increment();
++            }, entity) && entity.tickCount != before && !entity.isPassenger()) {
++                // A vehicle's step also moves its passengers; a passenger's own event does not.
++                this.completedEntitySteps.add(entity.isVehicle() ? entity.getPassengersAndSelf().count() : 1);
+             }

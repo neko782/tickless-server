@@ -1,0 +1,17 @@
+--- a/net/minecraft/util/thread/BlockableEventLoop.java
++++ b/net/minecraft/util/thread/BlockableEventLoop.java
+@@ -82,7 +_,13 @@
+ 
+     public void executeBlocking(final Runnable runnable) {
+         if (!this.isSameThread()) {
+-            this.submitAsync(runnable).join();
++            CompletableFuture<Void> future = this.submitAsync(runnable);
++            if (net.minecraft.world.level.parallel.WorldTxn.isServerThread(this.getRunningThread())) {
++                // A world event blocked on the server thread is an edge in the world wait graph.
++                net.minecraft.world.level.parallel.WorldTxn.awaitServerThread(future);
++            } else {
++                future.join();
++            }
+         } else {
+             runnable.run();
+         }

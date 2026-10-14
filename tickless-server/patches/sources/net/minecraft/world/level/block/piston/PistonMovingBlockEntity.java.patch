@@ -1,0 +1,81 @@
+--- a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
++++ b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
+@@ -19,6 +_,7 @@
+ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+ import net.minecraft.world.level.block.state.properties.PistonType;
+ import net.minecraft.world.level.material.PushReaction;
++import net.minecraft.world.level.parallel.Unowned;
+ import net.minecraft.world.level.redstone.ExperimentalRedstoneUtils;
+ import net.minecraft.world.level.storage.ValueInput;
+ import net.minecraft.world.level.storage.ValueOutput;
+@@ -26,6 +_,7 @@
+ import net.minecraft.world.phys.Vec3;
+ import net.minecraft.world.phys.shapes.Shapes;
+ import net.minecraft.world.phys.shapes.VoxelShape;
++import org.jspecify.annotations.Nullable;
+ 
+ public class PistonMovingBlockEntity extends BlockEntity {
+     private static final int TICKS_TO_EXTEND = 2;
+@@ -44,6 +_,13 @@
+     private float progressO = 0.0F;
+     private long lastTicked;
+     private int deathTicks;
++    // A geometry-only memo. Publishing it must not acquire the piston's world lock or
++    // participate in rollback; a rolled-back progress value simply misses the cache.
++    @Unowned
++    private volatile @Nullable CollisionShapeCache collisionShapeCache;
++
++    private record CollisionShapeCache(VoxelShape base, VoxelShape moving, Direction direction, float offset, VoxelShape result) {
++    }
+ 
+     public PistonMovingBlockEntity(final BlockPos worldPosition, final BlockState blockState) {
+         super(BlockEntityTypes.PISTON, worldPosition, blockState);
+@@ -175,11 +_,15 @@
+ 
+     private static void moveEntityByPiston(final Direction pistonDirection, final Entity entity, final double delta, final Direction movement) {
+         NOCLIP.set(pistonDirection);
+-        Vec3 previousPos = entity.position();
+-        entity.move(MoverType.PISTON, new Vec3(delta * movement.getStepX(), delta * movement.getStepY(), delta * movement.getStepZ()));
+-        entity.applyEffectsFromBlocks(previousPos, entity.position());
+-        entity.removeLatestMovementRecording();
+-        NOCLIP.set(null);
++        // Cleared even if the event is rolled back in the middle; it runs again on this thread.
++        try {
++            Vec3 previousPos = entity.position();
++            entity.move(MoverType.PISTON, new Vec3(delta * movement.getStepX(), delta * movement.getStepY(), delta * movement.getStepZ()));
++            entity.applyEffectsFromBlocks(previousPos, entity.position());
++            entity.removeLatestMovementRecording();
++        } finally {
++            NOCLIP.set(null);
++        }
+     }
+ 
+     private static void moveStuckEntities(final Level level, final BlockPos pos, final float newProgress, final PistonMovingBlockEntity self) {
+@@ -371,10 +_,23 @@
+         }
+ 
+         float extendedProgress = this.getExtendedProgress(this.progress);
+-        double dx = this.direction.getStepX() * extendedProgress;
+-        double dy = this.direction.getStepY() * extendedProgress;
+-        double dz = this.direction.getStepZ() * extendedProgress;
+-        return Shapes.or(pistonHeadShape, blockState.getCollisionShape(level, pos).move(dx, dy, dz));
++        Direction direction = this.direction;
++        VoxelShape movingShape = blockState.getCollisionShape(level, pos);
++        // Dynamic shapes still query their world/context and rebuild on every request.
++        boolean cacheable = !blockState.getBlock().hasDynamicShape() && !this.movedState.getBlock().hasDynamicShape();
++        CollisionShapeCache cached = this.collisionShapeCache;
++        if (cacheable && cached != null && cached.base == pistonHeadShape && cached.moving == movingShape
++            && cached.direction == direction && Float.floatToIntBits(cached.offset) == Float.floatToIntBits(extendedProgress)) {
++            return cached.result;
++        }
++        double dx = direction.getStepX() * extendedProgress;
++        double dy = direction.getStepY() * extendedProgress;
++        double dz = direction.getStepZ() * extendedProgress;
++        VoxelShape result = Shapes.or(pistonHeadShape, movingShape.move(dx, dy, dz));
++        if (cacheable) {
++            this.collisionShapeCache = new CollisionShapeCache(pistonHeadShape, movingShape, direction, extendedProgress, result);
++        }
++        return result;
+     }
+ 
+     public long getLastTicked() {

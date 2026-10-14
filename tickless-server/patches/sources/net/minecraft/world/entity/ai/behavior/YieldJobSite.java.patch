@@ -1,0 +1,43 @@
+--- a/net/minecraft/world/entity/ai/behavior/YieldJobSite.java
++++ b/net/minecraft/world/entity/ai/behavior/YieldJobSite.java
+@@ -8,6 +_,7 @@
+ import net.minecraft.world.entity.LivingEntity;
+ import net.minecraft.world.entity.PathfinderMob;
+ import net.minecraft.world.entity.ai.behavior.declarative.BehaviorBuilder;
++import net.minecraft.world.entity.ai.Brain;
+ import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+ import net.minecraft.world.entity.ai.village.poi.PoiType;
+ import net.minecraft.world.entity.npc.villager.Villager;
+@@ -65,20 +_,18 @@
+     }
+ 
+     private static boolean nearbyWantsJobsite(final Holder<PoiType> type, final Villager nearbyVillager, final BlockPos poiPos) {
+-        boolean nearbyHasPotentialJobSite = nearbyVillager.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE).isPresent();
+-        if (nearbyHasPotentialJobSite) {
+-            return false;
+-        } else {
+-            Optional<GlobalPos> nearbyVillagerJobSiteMemory = nearbyVillager.getBrain().getMemory(MemoryModuleType.JOB_SITE);
+-            Holder<VillagerProfession> nearbyProfession = nearbyVillager.getVillagerData().profession();
+-            if (nearbyProfession.value().heldJobSite().test(type)) {
+-                return nearbyVillagerJobSiteMemory.isEmpty()
+-                    ? canReachPos(nearbyVillager, poiPos, type.value())
+-                    : nearbyVillagerJobSiteMemory.get().pos().equals(poiPos);
+-            } else {
+-                return false;
+-            }
+-        }
++        // Profession matching is a pure observation and usually rejects the neighbour.
++        // Avoid fetching two foreign brain hints for villagers unable to hold this POI.
++        Holder<VillagerProfession> nearbyProfession = nearbyVillager.getVillagerData().profession();
++        if (!nearbyProfession.value().heldJobSite().test(type)) {
++            return false;
++        }
++        Brain<?> brain = nearbyVillager.getBrain();
++        if (brain.hasMemoryValue(MemoryModuleType.POTENTIAL_JOB_SITE)) {
++            return false;
++        }
++        Optional<GlobalPos> jobSite = brain.getMemory(MemoryModuleType.JOB_SITE);
++        return jobSite.isEmpty() ? canReachPos(nearbyVillager, poiPos, type.value()) : jobSite.get().pos().equals(poiPos);
+     }
+ 
+     private static boolean canReachPos(final PathfinderMob nearbyVillager, final BlockPos poiPos, final PoiType type) {

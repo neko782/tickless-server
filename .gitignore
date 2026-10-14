@@ -1,0 +1,14 @@
+.gradle/
+build/
+run/
+logs/
+__pycache__/
+.kotlin/
+
+tickless-server/src/minecraft/
+tickless-server/patches/rejected/
+
+.idea/
+*.iml
+out/
+.vscode/

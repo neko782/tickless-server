@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/level/levelgen/Heightmap.java
++++ b/net/minecraft/world/level/levelgen/Heightmap.java
+@@ -79,7 +_,7 @@
+         }
+     }
+ 
+-    public boolean update(final int localX, final int localY, final int localZ, final BlockState state) {
++    public synchronized boolean update(final int localX, final int localY, final int localZ, final BlockState state) {
+         int firstAvailable = this.getFirstAvailable(localX, localZ);
+         if (localY <= firstAvailable - 2) {
+             return false;

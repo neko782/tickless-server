@@ -1,0 +1,115 @@
+--- a/net/minecraft/world/entity/ai/goal/GoalSelector.java
++++ b/net/minecraft/world/entity/ai/goal/GoalSelector.java
+@@ -1,9 +_,7 @@
+ package net.minecraft.world.entity.ai.goal;
+ 
+ import it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet;
+-import java.util.EnumMap;
+ import java.util.EnumSet;
+-import java.util.Map;
+ import java.util.Set;
+ import java.util.function.Predicate;
+ import net.minecraft.util.profiling.Profiler;
+@@ -21,9 +_,10 @@
+             return false;
+         }
+     };
+-    private final Map<Goal.Flag, WrappedGoal> lockedFlags = new EnumMap<>(Goal.Flag.class);
++    private static final Goal.Flag[] FLAGS = Goal.Flag.values();
++    private final WrappedGoal[] lockedFlags = new WrappedGoal[FLAGS.length];
+     private final Set<WrappedGoal> availableGoals = new ObjectLinkedOpenHashSet<>();
+-    private final EnumSet<Goal.Flag> disabledFlags = EnumSet.noneOf(Goal.Flag.class);
++    private int disabledFlags;
+ 
+     public void addGoal(final int prio, final Goal goal) {
+         this.availableGoals.add(new WrappedGoal(prio, goal));
+@@ -43,19 +_,24 @@
+         this.removeAllGoals(goal -> goal == toRemove);
+     }
+ 
+-    private static boolean goalContainsAnyFlags(final WrappedGoal goal, final EnumSet<Goal.Flag> disabledFlags) {
+-        for (Goal.Flag flag : goal.getFlags()) {
+-            if (disabledFlags.contains(flag)) {
+-                return true;
+-            }
+-        }
+-
+-        return false;
+-    }
+-
+-    private static boolean goalCanBeReplacedForAllFlags(final WrappedGoal goal, final Map<Goal.Flag, WrappedGoal> lockedFlags) {
+-        for (Goal.Flag flag : goal.getFlags()) {
+-            if (!lockedFlags.getOrDefault(flag, NO_GOAL).canBeReplacedBy(goal)) {
++    private static int flagMask(final WrappedGoal goal) {
++        // Read the live EnumSet: callers can mutate getFlags(), including inside goal callbacks.
++        // Four contains checks avoid creating an iterator without changing that public API.
++        EnumSet<Goal.Flag> flags = goal.getFlags();
++        return (flags.contains(Goal.Flag.MOVE) ? 1 << Goal.Flag.MOVE.ordinal() : 0)
++            | (flags.contains(Goal.Flag.LOOK) ? 1 << Goal.Flag.LOOK.ordinal() : 0)
++            | (flags.contains(Goal.Flag.JUMP) ? 1 << Goal.Flag.JUMP.ordinal() : 0)
++            | (flags.contains(Goal.Flag.TARGET) ? 1 << Goal.Flag.TARGET.ordinal() : 0);
++    }
++
++    private boolean goalContainsDisabledFlags(final WrappedGoal goal) {
++        return this.disabledFlags != 0 && (flagMask(goal) & this.disabledFlags) != 0;
++    }
++
++    private boolean goalCanBeReplacedForAllFlags(final WrappedGoal goal) {
++        for (int flags = flagMask(goal); flags != 0; flags &= flags - 1) {
++            WrappedGoal current = this.lockedFlags[Integer.numberOfTrailingZeros(flags)];
++            if (!(current == null ? NO_GOAL : current).canBeReplacedBy(goal)) {
+                 return false;
+             }
+         }
+@@ -68,21 +_,30 @@
+         profiler.push("goalCleanup");
+ 
+         for (WrappedGoal goal : this.availableGoals) {
+-            if (goal.isRunning() && (goalContainsAnyFlags(goal, this.disabledFlags) || !goal.canContinueToUse())) {
++            if (goal.isRunning() && (this.goalContainsDisabledFlags(goal) || !goal.canContinueToUse())) {
+                 goal.stop();
+             }
+         }
+ 
+-        this.lockedFlags.entrySet().removeIf(entry -> !entry.getValue().isRunning());
++        for (int i = 0; i < this.lockedFlags.length; i++) {
++            WrappedGoal current = this.lockedFlags[i];
++            if (current != null && !current.isRunning()) {
++                this.lockedFlags[i] = null;
++            }
++        }
+         profiler.pop();
+         profiler.push("goalUpdate");
+ 
+         for (WrappedGoal goal : this.availableGoals) {
+-            if (!goal.isRunning() && !goalContainsAnyFlags(goal, this.disabledFlags) && goalCanBeReplacedForAllFlags(goal, this.lockedFlags) && goal.canUse()) {
+-                for (Goal.Flag flag : goal.getFlags()) {
+-                    WrappedGoal currentGoal = this.lockedFlags.getOrDefault(flag, NO_GOAL);
+-                    currentGoal.stop();
+-                    this.lockedFlags.put(flag, goal);
++            if (!goal.isRunning() && !this.goalContainsDisabledFlags(goal) && this.goalCanBeReplacedForAllFlags(goal) && goal.canUse()) {
++                // canUse may change the flags; take the same post-callback snapshot as EnumSet's iterator.
++                for (int flags = flagMask(goal); flags != 0; flags &= flags - 1) {
++                    int flag = Integer.numberOfTrailingZeros(flags);
++                    WrappedGoal currentGoal = this.lockedFlags[flag];
++                    if (currentGoal != null) {
++                        currentGoal.stop();
++                    }
++                    this.lockedFlags[flag] = goal;
+                 }
+ 
+                 goal.start();
+@@ -111,11 +_,11 @@
+     }
+ 
+     public void disableControlFlag(final Goal.Flag flag) {
+-        this.disabledFlags.add(flag);
++        this.disabledFlags |= 1 << flag.ordinal();
+     }
+ 
+     public void enableControlFlag(final Goal.Flag flag) {
+-        this.disabledFlags.remove(flag);
++        this.disabledFlags &= ~(1 << flag.ordinal());
+     }
+ 
+     public void setControlFlag(final Goal.Flag flag, final boolean enabled) {

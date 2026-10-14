@@ -1,0 +1,82 @@
+--- a/net/minecraft/server/level/DistanceManager.java
++++ b/net/minecraft/server/level/DistanceManager.java
+@@ -61,10 +_,45 @@
+ 
+     protected abstract @Nullable ChunkHolder updateChunkScheduling(final long node, final int level, final @Nullable ChunkHolder chunk, final int oldLevel);
+ 
++    // World workers ask whether chunks are in ticking range while the server thread updates the
++    // trackers. Readers validate an optimistic stamp and retry under the read lock if a write
++    // overlapped; the server thread holds the write lock only while tracker levels change.
++    private final java.util.concurrent.locks.StampedLock trackerLock = new java.util.concurrent.locks.StampedLock();
++    // Created once: a method reference at each call site would allocate on every lookup.
++    private final java.util.function.LongToIntFunction simulationLevel = key -> DistanceManager.this.simulationChunkTracker.getLevel(key);
++    private final java.util.function.LongToIntFunction naturalSpawnLevel = key -> DistanceManager.this.naturalSpawnChunkCounter.getLevel(key);
++
++    private int readLevel(final java.util.function.LongToIntFunction reader, final long key) {
++        long stamp = this.trackerLock.tryOptimisticRead();
++        if (stamp != 0L) {
++            try {
++                int level = reader.applyAsInt(key);
++                if (this.trackerLock.validate(stamp)) {
++                    return level;
++                }
++            } catch (RuntimeException ignored) {
++                // A concurrent rehash; retry under the read lock.
++            }
++        }
++
++        stamp = this.trackerLock.readLock();
++        try {
++            return reader.applyAsInt(key);
++        } finally {
++            this.trackerLock.unlockRead(stamp);
++        }
++    }
++
+     public boolean runAllUpdates(final ChunkMap scheduler) {
+-        this.naturalSpawnChunkCounter.runAllUpdates();
+-        this.simulationChunkTracker.runAllUpdates();
+-        this.playerTicketManager.runAllUpdates();
++        long stamp = this.trackerLock.writeLock();
++        try {
++            this.naturalSpawnChunkCounter.runAllUpdates();
++            this.simulationChunkTracker.runAllUpdates();
++            this.playerTicketManager.runAllUpdates();
++        } finally {
++            this.trackerLock.unlockWrite(stamp);
++        }
++
+         int updates = Integer.MAX_VALUE - this.loadingChunkTracker.runDistanceUpdates(Integer.MAX_VALUE);
+         boolean updated = updates != 0;
+         if (updated && SharedConstants.DEBUG_VERBOSE_SERVER_EVENTS) {
+@@ -133,15 +_,15 @@
+     }
+ 
+     public boolean inEntityTickingRange(final long key) {
+-        return ChunkLevel.isEntityTicking(this.simulationChunkTracker.getLevel(key));
++        return ChunkLevel.isEntityTicking(this.readLevel(this.simulationLevel, key));
+     }
+ 
+     public boolean inBlockTickingRange(final long key) {
+-        return ChunkLevel.isBlockTicking(this.simulationChunkTracker.getLevel(key));
++        return ChunkLevel.isBlockTicking(this.readLevel(this.simulationLevel, key));
+     }
+ 
+     public int getChunkLevel(final long key, final boolean simulation) {
+-        return simulation ? this.simulationChunkTracker.getLevel(key) : this.loadingChunkTracker.getLevel(key);
++        return simulation ? this.readLevel(this.simulationLevel, key) : this.loadingChunkTracker.getLevel(key);
+     }
+ 
+     protected void updatePlayerTickets(final int viewDistance) {
+@@ -161,8 +_,9 @@
+     }
+ 
+     public TriState hasPlayersNearby(final long pos) {
+-        this.naturalSpawnChunkCounter.runAllUpdates();
+-        int distance = this.naturalSpawnChunkCounter.getLevel(pos);
++        // Called by natural spawning on world workers; the server thread brings the counter up to
++        // date every game tick, so readers do not run updates themselves.
++        int distance = this.readLevel(this.naturalSpawnLevel, pos);
+         if (distance <= NaturalSpawner.INSCRIBED_SQUARE_SPAWN_DISTANCE_CHUNK) {
+             return TriState.TRUE;
+         } else {

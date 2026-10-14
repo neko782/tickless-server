@@ -1,0 +1,24 @@
+--- a/net/minecraft/world/entity/item/ItemEntity.java
++++ b/net/minecraft/world/entity/item/ItemEntity.java
+@@ -230,6 +_,11 @@
+     }
+ 
+     private void tryToMerge(final ItemEntity other) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(other);
++        if (other.isRemoved() || this.isRemoved()) {
++            return;
++        }
++
+         ItemStack thisItemStack = this.getItem();
+         ItemStack otherItemStack = other.getItem();
+         if (Objects.equals(this.target, other.target) && areMergable(thisItemStack, otherItemStack)) {
+@@ -339,7 +_,8 @@
+ 
+     @Override
+     public void playerTouch(final Player player) {
+-        if (!this.level().isClientSide()) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
++        if (!this.level().isClientSide() && !this.isRemoved()) {
+             ItemStack itemStack = this.getItem();
+             Item item = itemStack.getItem();
+             int orgCount = itemStack.getCount();

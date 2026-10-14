@@ -1,0 +1,34 @@
+--- a/net/minecraft/world/level/entity/EntityLookup.java
++++ b/net/minecraft/world/level/entity/EntityLookup.java
+@@ -13,8 +_,8 @@
+ 
+ public class EntityLookup<T extends EntityAccess> {
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Int2ObjectMap<T> byId = new Int2ObjectLinkedOpenHashMap<>();
+-    private final Map<UUID, T> byUuid = Maps.newHashMap();
++    private final Map<Integer, T> byId = new java.util.concurrent.ConcurrentHashMap<>();
++    private final Map<UUID, T> byUuid = new java.util.concurrent.ConcurrentHashMap<>();
+ 
+     public <U extends T> void getEntities(final EntityTypeTest<T, U> type, final AbortableIterationConsumer<U> consumer) {
+         for (T entity : this.byId.values()) {
+@@ -31,17 +_,16 @@
+ 
+     public void add(final T entity) {
+         UUID uuid = entity.getUUID();
+-        if (this.byUuid.containsKey(uuid)) {
++        if (this.byUuid.putIfAbsent(uuid, entity) != null) {
+             LOGGER.warn("Duplicate entity UUID {}: {}", uuid, entity);
+         } else {
+-            this.byUuid.put(uuid, entity);
+             this.byId.put(entity.getId(), entity);
+         }
+     }
+ 
+     public void remove(final T entity) {
+-        this.byUuid.remove(entity.getUUID());
+-        this.byId.remove(entity.getId());
++        this.byUuid.remove(entity.getUUID(), entity);
++        this.byId.remove(entity.getId(), entity);
+     }
+ 
+     public @Nullable T getEntity(final int id) {

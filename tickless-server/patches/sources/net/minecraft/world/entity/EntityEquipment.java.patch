@@ -1,0 +1,150 @@
+--- a/net/minecraft/world/entity/EntityEquipment.java
++++ b/net/minecraft/world/entity/EntityEquipment.java
+@@ -7,8 +_,14 @@
+ import java.util.Map.Entry;
+ import net.minecraft.world.entity.item.ItemEntity;
+ import net.minecraft.world.item.ItemStack;
++import net.minecraft.core.component.DataComponents;
++import net.minecraft.world.item.component.MobVisibility;
++import net.minecraft.world.item.equipment.Equippable;
++import net.minecraft.world.level.parallel.Unowned;
+ 
+ public class EntityEquipment {
++    /** The entity this belongs to, set when an entity stores it in a field; see WorldOwnership.adopt. */
++    public net.minecraft.world.entity.@org.jspecify.annotations.Nullable Entity worldOwner;
+     public static final Codec<EntityEquipment> CODEC = Codec.unboundedMap(EquipmentSlot.CODEC, ItemStack.CODEC).xmap(items -> {
+         EnumMap<EquipmentSlot, ItemStack> map = new EnumMap<>(EquipmentSlot.class);
+         map.putAll((Map<? extends EquipmentSlot, ? extends ItemStack>)items);
+@@ -19,9 +_,12 @@
+         return items;
+     });
+     private final EnumMap<EquipmentSlot, ItemStack> items;
++    private static final VisibilitySnapshot EMPTY_VISIBILITY = new VisibilitySnapshot(0.0F, new MobVisibility[0]);
++    private volatile VisibilitySnapshot visibility = EMPTY_VISIBILITY;
+ 
+     private EntityEquipment(final EnumMap<EquipmentSlot, ItemStack> items) {
+         this.items = items;
++        this.refreshVisibility();
+     }
+ 
+     public EntityEquipment() {
+@@ -29,13 +_,94 @@
+     }
+ 
+     public ItemStack set(final EquipmentSlot slot, final ItemStack itemStack) {
+-        return Objects.requireNonNullElse(this.items.put(slot, itemStack), ItemStack.EMPTY);
++        VisibilitySnapshot oldVisibility = this.visibility;
++        ItemStack old = this.items.put(slot, itemStack);
++        if (old != itemStack) {
++            net.minecraft.world.level.parallel.WorldUndo.action(() -> {
++                if (old == null) {
++                    this.items.remove(slot);
++                } else {
++                    this.items.put(slot, old);
++                }
++                this.visibility = oldVisibility;
++            });
++        }
++
++        this.refreshVisibility();
++        return Objects.requireNonNullElse(old, ItemStack.EMPTY);
++    }
++
++    private void logAll() {
++        if (net.minecraft.world.level.parallel.WorldUndo.isLogging()) {
++            EnumMap<EquipmentSlot, ItemStack> old = new EnumMap<>(this.items);
++            VisibilitySnapshot oldVisibility = this.visibility;
++            net.minecraft.world.level.parallel.WorldUndo.action(() -> {
++                this.items.clear();
++                this.items.putAll(old);
++                this.visibility = oldVisibility;
++            });
++        }
+     }
+ 
+     public ItemStack get(final EquipmentSlot slot) {
+         return this.items.getOrDefault(slot, ItemStack.EMPTY);
+     }
+ 
++    /**
++     * Observation only: targeting can use the previous equipment state until its next update.
++     * Publish immutable component values while holding the owner, so readers never inspect a
++     * concurrently edited stack or component map. Ordinary get/set access remains owned.
++     */
++    @Unowned
++    public double applyVisibility(final double initial, final Entity targetingEntity) {
++        double modifier = initial;
++        for (MobVisibility visibility : this.visibility.modifiers) {
++            if (visibility.targetingEntityTypes().contains(targetingEntity.typeHolder())) {
++                modifier *= visibility.visibility();
++            }
++        }
++        return modifier;
++    }
++
++    @Unowned
++    public float armorCoverForVisibility() {
++        return this.visibility.armorCover;
++    }
++
++    /** Called under the owner's lock on replacement and after inventory ticking. */
++    private void refreshVisibility() {
++        if (this.items.isEmpty()) {
++            this.visibility = EMPTY_VISIBILITY;
++            return;
++        }
++        int armored = 0;
++        int totalArmor = 0;
++        MobVisibility[] modifiers = new MobVisibility[EquipmentSlot.VALUES.size()];
++        int count = 0;
++        for (EquipmentSlot slot : EquipmentSlot.VALUES) {
++            ItemStack item = this.items.getOrDefault(slot, ItemStack.EMPTY);
++            if (slot.getType() == EquipmentSlot.Type.HUMANOID_ARMOR) {
++                totalArmor++;
++                if (!item.isEmpty()) {
++                    armored++;
++                }
++            }
++            MobVisibility visibility = item.get(DataComponents.MOB_VISIBILITY);
++            if (visibility != null) {
++                Equippable equippable = item.get(DataComponents.EQUIPPABLE);
++                if (equippable != null && slot == equippable.slot()) {
++                    modifiers[count++] = visibility;
++                }
++            }
++        }
++        float cover = totalArmor > 0 ? (float)armored / totalArmor : 0.0F;
++        this.visibility = count == 0 && armored == 0 ? EMPTY_VISIBILITY
++            : new VisibilitySnapshot(cover, java.util.Arrays.copyOf(modifiers, count));
++    }
++
++    private record VisibilitySnapshot(float armorCover, MobVisibility[] modifiers) {
++    }
++
+     public boolean isEmpty() {
+         for (ItemStack item : this.items.values()) {
+             if (!item.isEmpty()) {
+@@ -53,11 +_,14 @@
+                 item.inventoryTick(owner.level(), owner, entry.getKey());
+             }
+         }
++        this.refreshVisibility();
+     }
+ 
+     public void setAll(final EntityEquipment equipment) {
++        this.logAll();
+         this.items.clear();
+         this.items.putAll(equipment.items);
++        this.refreshVisibility();
+     }
+ 
+     public void dropAll(final LivingEntity dropper) {
+@@ -72,6 +_,8 @@
+     }
+ 
+     public void clear() {
++        this.logAll();
+         this.items.replaceAll((s, v) -> ItemStack.EMPTY);
++        this.visibility = EMPTY_VISIBILITY;
+     }
+ }

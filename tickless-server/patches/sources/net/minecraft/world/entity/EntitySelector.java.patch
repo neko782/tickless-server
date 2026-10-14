@@ -1,0 +1,15 @@
+--- a/net/minecraft/world/entity/EntitySelector.java
++++ b/net/minecraft/world/entity/EntitySelector.java
+@@ -27,6 +_,12 @@
+     }
+ 
+     public static Predicate<Entity> pushableBy(final Entity entity) {
++        if (!entity.level().isClientSide() && !entity.level().getScoreboard().hasTeamMembers()) {
++            // Nobody is on a team, so every collision rule is ALWAYS. Skips a team lookup per
++            // candidate in crowds; a team joined meanwhile applies from the next push.
++            return NO_SPECTATORS.and(Entity::isPushable);
++        }
++
+         Team ownTeam = entity.getTeam();
+         Team.CollisionRule ownCollisionRule = ownTeam == null ? Team.CollisionRule.ALWAYS : ownTeam.getCollisionRule();
+         return ownCollisionRule == Team.CollisionRule.NEVER

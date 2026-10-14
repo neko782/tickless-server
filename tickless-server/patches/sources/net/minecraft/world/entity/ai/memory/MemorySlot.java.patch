@@ -1,0 +1,120 @@
+--- a/net/minecraft/world/entity/ai/memory/MemorySlot.java
++++ b/net/minecraft/world/entity/ai/memory/MemorySlot.java
+@@ -5,20 +_,35 @@
+ 
+ public class MemorySlot<T> {
+     private static final long NEVER_EXPIRE = Long.MAX_VALUE;
+-    private @Nullable T value;
+-    private long timeToLive;
++    private static final State<?> EMPTY = new State<>(null, NEVER_EXPIRE);
++    private static final java.util.concurrent.atomic.AtomicReferenceFieldUpdater<MemorySlot, State> STATE =
++        java.util.concurrent.atomic.AtomicReferenceFieldUpdater.newUpdater(MemorySlot.class, State.class, "state");
++    private volatile State<T> state;
++
++    private static final class State<T> {
++        final @Nullable T value;
++        final java.util.Optional<T> optionalValue;
++        volatile long timeToLive;
++        State(final @Nullable T value, final long timeToLive) {
++            this.value = value;
++            this.optionalValue = java.util.Optional.ofNullable(value);
++            this.timeToLive = timeToLive;
++        }
++    }
+ 
+     private MemorySlot(final @Nullable T value, final long timeToLive) {
+-        this.value = value;
+-        this.timeToLive = timeToLive;
++        this.state = new State<>(value, timeToLive);
+     }
+ 
+     public void tick() {
+-        if (this.hasValue() && this.canExpire()) {
+-            if (this.hasExpired()) {
+-                this.clear();
++        State<T> observed = this.state;
++        long ttl = observed.timeToLive;
++        if (observed.value != null && ttl != NEVER_EXPIRE) {
++            if (ttl <= 0L) {
++                // Expiring an old observation must not erase a concurrently replaced hint.
++                STATE.compareAndSet(this, observed, EMPTY);
+             } else {
+-                this.timeToLive--;
++                observed.timeToLive = ttl - 1L;
+             }
+         }
+     }
+@@ -28,8 +_,7 @@
+     }
+ 
+     public void set(final T value, final long timeToLive) {
+-        this.value = value;
+-        this.timeToLive = timeToLive;
++        this.state = new State<>(value, timeToLive);
+     }
+ 
+     public void set(final T value) {
+@@ -37,44 +_,48 @@
+     }
+ 
+     public void clear() {
+-        this.value = null;
+-        this.timeToLive = Long.MAX_VALUE;
++        this.state = (State<T>)EMPTY;
+     }
+ 
+     public boolean hasValue() {
+-        return this.value != null;
++        return this.state.value != null;
+     }
+ 
+     public @Nullable T value() {
+-        return this.value;
++        return this.state.value;
++    }
++
++    public java.util.Optional<T> optionalValue() {
++        return this.state.optionalValue;
+     }
+ 
+     public boolean canExpire() {
+-        return this.timeToLive != Long.MAX_VALUE;
++        return this.state.timeToLive != Long.MAX_VALUE;
+     }
+ 
+     public boolean hasExpired() {
+-        return this.timeToLive <= 0L;
++        return this.state.timeToLive <= 0L;
+     }
+ 
+     public long timeToLive() {
+-        return this.timeToLive;
++        return this.state.timeToLive;
+     }
+ 
+     @Override
+     public String toString() {
+-        return this.value == null ? "<empty>" : this.value + (this.canExpire() ? " (ttl: " + this.timeToLive + ")" : "");
++        return this.state.value == null ? "<empty>" : this.state.value + (this.canExpire() ? " (ttl: " + this.state.timeToLive + ")" : "");
+     }
+ 
+     public void visit(final MemoryModuleType<T> type, final Brain.Visitor visitor) {
+-        if (this.value != null) {
+-            if (this.canExpire()) {
+-                visitor.accept(type, this.value, this.timeToLive);
+-            } else {
+-                visitor.accept(type, this.value);
+-            }
+-        } else {
++        State<T> observed = this.state;
++        T value = observed.value;
++        long ttl = observed.timeToLive;
++        if (value == null) {
+             visitor.acceptEmpty(type);
++        } else if (ttl != NEVER_EXPIRE) {
++            visitor.accept(type, value, ttl);
++        } else {
++            visitor.accept(type, value);
+         }
+     }
+ }

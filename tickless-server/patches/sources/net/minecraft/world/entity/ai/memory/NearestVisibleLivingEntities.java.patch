@@ -1,0 +1,134 @@
+--- a/net/minecraft/world/entity/ai/memory/NearestVisibleLivingEntities.java
++++ b/net/minecraft/world/entity/ai/memory/NearestVisibleLivingEntities.java
+@@ -1,7 +_,11 @@
+ package net.minecraft.world.entity.ai.memory;
+ 
+ import com.google.common.collect.Iterables;
+-import it.unimi.dsi.fastutil.objects.Object2BooleanOpenHashMap;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.Map;
++import java.util.Set;
++import net.minecraft.world.entity.EntityType;
++import it.unimi.dsi.fastutil.ints.IntArrayList;
+ import java.util.List;
+ import java.util.Optional;
+ import java.util.function.Predicate;
+@@ -15,6 +_,11 @@
+     private static final NearestVisibleLivingEntities EMPTY = new NearestVisibleLivingEntities();
+     private final List<LivingEntity> nearbyEntities;
+     private final Predicate<LivingEntity> lineOfSightTest;
++    private volatile TypeIndex typeIndices;
++
++    // A village snapshot usually has one type. Its positions are already 0..size-1;
++    // retaining another full array per brain needlessly doubles neighbor storage.
++    private record TypeIndex(EntityType<?> uniformType, Map<EntityType<?>, int[]> mixed) {}
+ 
+     private NearestVisibleLivingEntities() {
+         this.nearbyEntities = List.of();
+@@ -22,10 +_,20 @@
+     }
+ 
+     public NearestVisibleLivingEntities(final ServerLevel level, final LivingEntity body, final List<LivingEntity> livingEntities) {
+-        this.nearbyEntities = livingEntities;
+-        Object2BooleanOpenHashMap<LivingEntity> cache = new Object2BooleanOpenHashMap<>(livingEntities.size());
++        this.nearbyEntities = List.copyOf(livingEntities);
++        ConcurrentHashMap<LivingEntity, Boolean> cache = new ConcurrentHashMap<>();
+         Predicate<LivingEntity> targetTest = targetEntity -> Sensor.isEntityTargetable(level, body, targetEntity);
+-        this.lineOfSightTest = otherEntity -> cache.computeIfAbsent(otherEntity, targetTest);
++        // A brain memory can be observed by another entity. Compute outside the map's bin
++        // monitor: targeting may enter world code, so it must not wait while holding a bin.
++        this.lineOfSightTest = otherEntity -> {
++            Boolean result = cache.get(otherEntity);
++            if (result != null) {
++                return result;
++            }
++            boolean visible = targetTest.test(otherEntity);
++            Boolean raced = cache.putIfAbsent(otherEntity, visible);
++            return raced != null ? raced : visible;
++        };
+     }
+ 
+     public static NearestVisibleLivingEntities empty() {
+@@ -44,6 +_,82 @@
+             }
+         }
+ 
++        return Optional.empty();
++    }
++
++    /** Build once per sensor snapshot, then skip entity types a sensor cannot use. */
++    private TypeIndex typeIndices() {
++        TypeIndex indices = this.typeIndices;
++        if (indices == null) {
++            EntityType<?> uniform = this.nearbyEntities.isEmpty() ? null : this.nearbyEntities.getFirst().getType();
++            for (int i = 1; uniform != null && i < this.nearbyEntities.size(); i++) {
++                if (this.nearbyEntities.get(i).getType() != uniform) uniform = null;
++            }
++            if (uniform != null) {
++                this.typeIndices = indices = new TypeIndex(uniform, Map.of());
++                return indices;
++            }
++            Map<EntityType<?>, IntArrayList> builders = new java.util.IdentityHashMap<>();
++            for (int i = 0; i < this.nearbyEntities.size(); i++) {
++                builders.computeIfAbsent(this.nearbyEntities.get(i).getType(), ignored -> new IntArrayList()).add(i);
++            }
++            Map<EntityType<?>, int[]> built = new java.util.IdentityHashMap<>();
++            builders.forEach((type, positions) -> built.put(type, positions.toIntArray()));
++            this.typeIndices = indices = new TypeIndex(null, java.util.Collections.unmodifiableMap(built));
++        }
++        return indices;
++    }
++
++    public List<LivingEntity> findAll(final EntityType<?> type, final Predicate<LivingEntity> filter) {
++        TypeIndex lookup = this.typeIndices();
++        if (lookup.uniformType != null) {
++            if (lookup.uniformType != type) return List.of();
++            List<LivingEntity> result = new java.util.ArrayList<>();
++            for (LivingEntity entity : this.nearbyEntities) {
++                if (filter.test(entity) && this.lineOfSightTest.test(entity)) result.add(entity);
++            }
++            return List.copyOf(result);
++        }
++        int[] indices = lookup.mixed.get(type);
++        if (indices == null) {
++            return List.of();
++        }
++        List<LivingEntity> result = new java.util.ArrayList<>();
++        for (int index : indices) {
++            LivingEntity entity = this.nearbyEntities.get(index);
++            if (filter.test(entity) && this.lineOfSightTest.test(entity)) {
++                result.add(entity);
++            }
++        }
++        return List.copyOf(result);
++    }
++
++    public Optional<LivingEntity> findClosest(final Set<EntityType<?>> types, final Predicate<LivingEntity> filter) {
++        // Merge the selected indices before testing: predicates and visibility still run in
++        // the original nearest-first order, including their short-circuit behavior.
++        TypeIndex lookup = this.typeIndices();
++        if (lookup.uniformType != null) {
++            for (EntityType<?> type : types) {
++                if (type == lookup.uniformType) return this.findClosest(filter);
++            }
++            return Optional.empty();
++        }
++        IntArrayList selected = new IntArrayList();
++        Map<EntityType<?>, int[]> indices = lookup.mixed;
++        for (EntityType<?> type : types) {
++            int[] positions = indices.get(type);
++            if (positions != null) {
++                selected.addElements(selected.size(), positions);
++            }
++        }
++        int[] positions = selected.toIntArray();
++        java.util.Arrays.sort(positions);
++        for (int index : positions) {
++            LivingEntity entity = this.nearbyEntities.get(index);
++            if (filter.test(entity) && this.lineOfSightTest.test(entity)) {
++                return Optional.of(entity);
++            }
++        }
+         return Optional.empty();
+     }
+ 

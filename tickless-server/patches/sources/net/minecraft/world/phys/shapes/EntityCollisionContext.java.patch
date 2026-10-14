@@ -1,0 +1,67 @@
+--- a/net/minecraft/world/phys/shapes/EntityCollisionContext.java
++++ b/net/minecraft/world/phys/shapes/EntityCollisionContext.java
+@@ -12,10 +_,11 @@
+ import org.jspecify.annotations.Nullable;
+ 
+ public class EntityCollisionContext implements CollisionContext {
+-    private final boolean descending;
++    private boolean descending;
++    private boolean descendingInitialized;
+     private final double entityBottom;
+     private final boolean placement;
+-    private final ItemStack heldItem;
++    private @Nullable ItemStack heldItem;
+     private final boolean alwaysCollideWithFluid;
+     private final @Nullable Entity entity;
+ 
+@@ -28,6 +_,7 @@
+         final @Nullable Entity entity
+     ) {
+         this.descending = descending;
++        this.descendingInitialized = true;
+         this.placement = placement;
+         this.entityBottom = entityBottom;
+         this.heldItem = heldItem;
+@@ -37,19 +_,22 @@
+ 
+     @Deprecated
+     protected EntityCollisionContext(final Entity entity, final boolean alwaysCollideWithFluid, final boolean placement) {
+-        this(
+-            entity.isDescending(),
+-            placement,
+-            entity.getY(),
+-            entity instanceof LivingEntity livingEntity ? livingEntity.getMainHandItem() : ItemStack.EMPTY,
+-            alwaysCollideWithFluid,
+-            entity
+-        );
++        // Most shapes (air, stone, etc.) never ask about sneaking or equipment. Resolve these
++        // only on first use, as in Lithium's lazy shape contexts. Contexts belong to one query.
++        this.placement = placement;
++        this.entityBottom = entity.getY();
++        this.alwaysCollideWithFluid = alwaysCollideWithFluid;
++        this.entity = entity;
+     }
+ 
+     @Override
+     public boolean isHoldingItem(final Item item) {
+-        return this.heldItem.is(item);
++        ItemStack itemStack = this.heldItem;
++        if (itemStack == null) {
++            itemStack = this.entity instanceof LivingEntity livingEntity ? livingEntity.getMainHandItem() : ItemStack.EMPTY;
++            this.heldItem = itemStack;
++        }
++        return itemStack.is(item);
+     }
+ 
+     @Override
+@@ -69,6 +_,10 @@
+ 
+     @Override
+     public boolean isDescending() {
++        if (!this.descendingInitialized) {
++            this.descending = this.entity != null && this.entity.isDescending();
++            this.descendingInitialized = true;
++        }
+         return this.descending;
+     }
+ 

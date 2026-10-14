@@ -1,0 +1,89 @@
+--- a/net/minecraft/world/level/timers/TimerQueue.java
++++ b/net/minecraft/world/level/timers/TimerQueue.java
+@@ -7,7 +_,6 @@
+ import com.mojang.serialization.Codec;
+ import com.mojang.serialization.codecs.RecordCodecBuilder;
+ import java.util.Collection;
+-import java.util.Collections;
+ import java.util.Comparator;
+ import java.util.List;
+ import java.util.PriorityQueue;
+@@ -50,19 +_,32 @@
+ 
+     public void tick(final T context, final long currentTick) {
+         while (true) {
+-            TimerQueue.Event<T> event = this.queue.peek();
+-            if (event == null || event.triggerTime > currentTick) {
+-                return;
++            TimerQueue.Event<T> event;
++            synchronized (this.queue) {
++                event = this.queue.peek();
++                if (event == null || event.triggerTime > currentTick) {
++                    return;
++                }
++
++                this.queue.remove();
++                this.events.remove(event.id, currentTick);
++                this.setDirty();
+             }
+ 
+-            this.queue.remove();
+-            this.events.remove(event.id, currentTick);
+-            this.setDirty();
++            // Outside the latch: the callback runs a function, which can wait for world locks.
+             event.callback.handle(context, this, currentTick);
+         }
+     }
+ 
++    // Functions and commands schedule from world workers (player commands, command blocks) while the
++    // clock ticks this queue, so every access holds the queue's monitor, a short leaf latch.
+     public void schedule(final String id, final long time, final TimerCallback<T> callback) {
++        synchronized (this.queue) {
++            this.scheduleUnlocked(id, time, callback);
++        }
++    }
++
++    private void scheduleUnlocked(final String id, final long time, final TimerCallback<T> callback) {
+         if (!this.events.contains(id, time)) {
+             this.sequentialId = this.sequentialId.plus(UnsignedLong.ONE);
+             TimerQueue.Event<T> newEvent = new TimerQueue.Event<>(time, this.sequentialId, id, callback);
+@@ -73,23 +_,29 @@
+     }
+ 
+     public int remove(final String id) {
+-        Collection<TimerQueue.Event<T>> eventsToRemove = this.events.row(id).values();
+-        eventsToRemove.forEach(this.queue::remove);
+-        int size = eventsToRemove.size();
+-        eventsToRemove.clear();
+-        this.setDirty();
+-        return size;
++        synchronized (this.queue) {
++            Collection<TimerQueue.Event<T>> eventsToRemove = this.events.row(id).values();
++            eventsToRemove.forEach(this.queue::remove);
++            int size = eventsToRemove.size();
++            eventsToRemove.clear();
++            this.setDirty();
++            return size;
++        }
+     }
+ 
+     public Set<String> getEventsIds() {
+-        return Collections.unmodifiableSet(this.events.rowKeySet());
++        synchronized (this.queue) {
++            return Set.copyOf(this.events.rowKeySet());
++        }
+     }
+ 
+     @VisibleForTesting
+     protected TimerQueue.Packed<T> pack() {
+-        return new TimerQueue.Packed<>(
+-            this.queue.stream().sorted(createComparator()).map(event -> new TimerQueue.Event.Packed<>(event.triggerTime, event.id, event.callback)).toList()
+-        );
++        synchronized (this.queue) {
++            return new TimerQueue.Packed<>(
++                this.queue.stream().sorted(createComparator()).map(event -> new TimerQueue.Event.Packed<>(event.triggerTime, event.id, event.callback)).toList()
++            );
++        }
+     }
+ 
+     public record Event<T>(long triggerTime, UnsignedLong sequentialId, String id, TimerCallback<T> callback) {

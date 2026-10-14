@@ -1,0 +1,172 @@
+--- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -14,7 +_,6 @@
+ import java.util.function.BiPredicate;
+ import java.util.function.BooleanSupplier;
+ import java.util.function.Predicate;
+-import java.util.stream.IntStream;
+ import java.util.stream.Stream;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.core.Holder;
+@@ -44,7 +_,21 @@
+     public static final int MAX_VILLAGE_DISTANCE = 6;
+     public static final int VILLAGE_SECTION_SIZE = 1;
+     private final PoiManager.DistanceTracker distanceTracker;
+-    private final LongSet loadedChunks = new LongOpenHashSet();
++    private final java.util.Set<Long> loadedChunks = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<ChunkSections> chunkSections = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
++
++    private final java.util.concurrent.atomic.AtomicLong queryVersion = new java.util.concurrent.atomic.AtomicLong();
++    private final java.util.concurrent.ConcurrentHashMap<SquareKey, SquareSnapshot> squareQueries = new java.util.concurrent.ConcurrentHashMap<>();
++    private record SquareKey(int x, int z, int radius) {}
++    private record SquareSnapshot(long version, PoiSection.TypeGroup[] groups) {}
++
++    private static final class ChunkSections {
++        final java.util.concurrent.atomic.AtomicInteger version = new java.util.concurrent.atomic.AtomicInteger();
++        volatile @Nullable SectionSnapshot snapshot;
++    }
++
++    private record SectionSnapshot(int version, PoiSection.TypeGroup[] groups) {
++    }
+ 
+     public PoiManager(
+         final RegionStorageInfo info,
+@@ -88,7 +_,27 @@
+         final Predicate<Holder<PoiType>> predicate, final BlockPos center, final int radius, final PoiManager.Occupancy occupancy
+     ) {
+         int chunkRadius = Math.floorDiv(radius, 16) + 1;
+-        return ChunkPos.rangeClosed(ChunkPos.containing(center), chunkRadius).flatMap(pos -> this.getInChunk(predicate, pos, occupancy)).filter(record -> {
++        // Bind membership lazily, as with the old chunk flatMap. Nearby brains frequently
++        // search the same chunk square; share its immutable groups instead of constructing
++        // and traversing a stream for each mostly empty chunk on every search.
++        return Stream.of(center).flatMap(origin -> {
++            ChunkPos chunk = ChunkPos.containing(origin);
++            SquareKey key = new SquareKey(chunk.x(), chunk.z(), chunkRadius);
++            long version = this.queryVersion.get();
++            SquareSnapshot snapshot = this.squareQueries.get(key);
++            if (snapshot == null || snapshot.version != version) {
++                List<PoiSection.TypeGroup> groups = new java.util.ArrayList<>();
++                ChunkPos.rangeClosed(chunk, chunkRadius).forEach(pos ->
++                    java.util.Collections.addAll(groups, this.chunkGroups(pos)));
++                snapshot = new SquareSnapshot(version, groups.toArray(PoiSection.TypeGroup[]::new));
++                if (this.queryVersion.get() == version) {
++                    // Observational cache only: bounding retention does not affect records.
++                    if (this.squareQueries.size() >= 4096) this.squareQueries.clear();
++                    this.squareQueries.put(key, snapshot);
++                }
++            }
++            return PoiSection.query(snapshot.groups, predicate, occupancy);
++        }).filter(record -> {
+             BlockPos pos = record.getPos();
+             return Math.abs(pos.getX() - center.getX()) <= radius && Math.abs(pos.getZ() - center.getZ()) <= radius;
+         });
+@@ -103,11 +_,43 @@
+ 
+     @VisibleForDebug
+     public Stream<PoiRecord> getInChunk(final Predicate<Holder<PoiType>> predicate, final ChunkPos chunkPos, final PoiManager.Occupancy occupancy) {
+-        return IntStream.rangeClosed(this.levelHeightAccessor.getMinSectionY(), this.levelHeightAccessor.getMaxSectionY())
+-            .boxed()
+-            .map(sectionY -> this.getOrLoad(SectionPos.of(chunkPos, sectionY).asLong()))
+-            .filter(Optional::isPresent)
+-            .flatMap(poiSection -> poiSection.get().getRecords(predicate, occupancy));
++        // Bind section membership when the caller consumes the stream, as before.
++        // getInSquare already defers this lookup through its outer flatMap.
++        return Stream.of(chunkPos).flatMap(pos -> this.getInChunkNow(predicate, pos, occupancy));
++    }
++
++    private Stream<PoiRecord> getInChunkNow(final Predicate<Holder<PoiType>> predicate, final ChunkPos chunkPos, final PoiManager.Occupancy occupancy) {
++        return PoiSection.query(this.chunkGroups(chunkPos), predicate, occupancy);
++    }
++
++    private PoiSection.TypeGroup[] chunkGroups(final ChunkPos chunkPos) {
++        ChunkSections column = this.chunkSections.computeIfAbsent(chunkPos.pack(), key -> new ChunkSections());
++        int version = column.version.get();
++        SectionSnapshot snapshot = column.snapshot;
++        if (snapshot == null || snapshot.version != version) {
++            List<PoiSection.TypeGroup> groups = new java.util.ArrayList<>();
++            for (int sectionY = this.levelHeightAccessor.getMinSectionY(); sectionY <= this.levelHeightAccessor.getMaxSectionY(); sectionY++) {
++                this.getOrLoad(SectionPos.asLong(chunkPos.x(), sectionY, chunkPos.z()))
++                    .ifPresent(section -> java.util.Collections.addAll(groups, section.queryGroups()));
++            }
++            snapshot = new SectionSnapshot(version, groups.toArray(PoiSection.TypeGroup[]::new));
++            if (column.version.get() == version) {
++                column.snapshot = snapshot;
++            }
++        }
++        // Dirty callbacks invalidate membership; queries always test the live ticket state.
++        return snapshot.groups;
++    }
++
++    @Override
++    protected void onSectionCreated(final long sectionPos) {
++        this.invalidateChunkSections(sectionPos);
++    }
++
++    private void invalidateChunkSections(final long sectionPos) {
++        long key = ChunkPos.pack(SectionPos.x(sectionPos), SectionPos.z(sectionPos));
++        this.chunkSections.computeIfAbsent(key, k -> new ChunkSections()).version.incrementAndGet();
++        this.queryVersion.incrementAndGet();
+     }
+ 
+     public Stream<BlockPos> findAll(
+@@ -180,13 +_,13 @@
+     public Optional<BlockPos> take(
+         final Predicate<Holder<PoiType>> predicate, final BiPredicate<Holder<PoiType>, BlockPos> filter, final BlockPos center, final int radius
+     ) {
++        // Claim the ticket as part of the search: if another villager on a different world worker
++        // takes the last ticket of a candidate first, move on to the next candidate.
+         return this.getInRange(predicate, center, radius, PoiManager.Occupancy.HAS_SPACE)
+             .filter(poi -> filter.test(poi.getPoiType(), poi.getPos()))
++            .filter(PoiRecord::acquireTicket)
+             .findFirst()
+-            .map(r -> {
+-                r.acquireTicket();
+-                return r.getPos();
+-            });
++            .map(PoiRecord::getPos);
+     }
+ 
+     public Optional<BlockPos> getRandom(
+@@ -221,8 +_,10 @@
+     }
+ 
+     public int sectionsToVillage(final SectionPos sectionPos) {
+-        this.distanceTracker.runAllUpdates();
+-        return this.distanceTracker.getLevel(sectionPos.asLong());
++        synchronized (this.distanceTracker) {
++            this.distanceTracker.runAllUpdates();
++            return this.distanceTracker.getLevel(sectionPos.asLong());
++        }
+     }
+ 
+     private boolean isVillageCenter(final long sectionPos) {
+@@ -234,18 +_,26 @@
+     @Override
+     public void tick(final BooleanSupplier haveTime) {
+         super.tick(haveTime);
+-        this.distanceTracker.runAllUpdates();
++        synchronized (this.distanceTracker) {
++            this.distanceTracker.runAllUpdates();
++        }
+     }
+ 
+     @Override
+     protected void setDirty(final long sectionPos) {
+         super.setDirty(sectionPos);
+-        this.distanceTracker.update(sectionPos, this.distanceTracker.getLevelFromSource(sectionPos), false);
++        this.invalidateChunkSections(sectionPos);
++        synchronized (this.distanceTracker) {
++            this.distanceTracker.update(sectionPos, this.distanceTracker.getLevelFromSource(sectionPos), false);
++        }
+     }
+ 
+     @Override
+     protected void onSectionLoad(final long sectionPos) {
+-        this.distanceTracker.update(sectionPos, this.distanceTracker.getLevelFromSource(sectionPos), false);
++        this.invalidateChunkSections(sectionPos);
++        synchronized (this.distanceTracker) {
++            this.distanceTracker.update(sectionPos, this.distanceTracker.getLevelFromSource(sectionPos), false);
++        }
+     }
+ 
+     public void checkConsistencyWithBlocks(final SectionPos sectionPos, final LevelChunkSection blockSection) {

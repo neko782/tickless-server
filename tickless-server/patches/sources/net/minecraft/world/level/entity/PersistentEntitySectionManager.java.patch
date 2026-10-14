@@ -1,0 +1,283 @@
+--- a/net/minecraft/world/level/entity/PersistentEntitySectionManager.java
++++ b/net/minecraft/world/level/entity/PersistentEntitySectionManager.java
+@@ -31,30 +_,59 @@
+ 
+ public class PersistentEntitySectionManager<T extends EntityAccess> implements AutoCloseable {
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Set<UUID> knownUuids = Sets.newHashSet();
++    private static final int LATCH_STRIPES = 256;
++    private final Set<UUID> knownUuids = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    // Short latches that keep an entity's section membership and its ticking/tracking state in
++    // step with chunk visibility changes. They are striped by chunk and never held while waiting
++    // for world locks.
++    private final Object[] latches = new Object[LATCH_STRIPES];
+     private final LevelCallback<T> callbacks;
+     private final EntityPersistentStorage<T> permanentStorage;
+     private final EntityLookup<T> visibleEntityStorage;
+     private final EntitySectionStorage<T> sectionStorage;
+     private final LevelEntityGetter<T> entityGetter;
+-    private final Long2ObjectMap<Visibility> chunkVisibility = new Long2ObjectOpenHashMap<>();
+-    private final Long2ObjectMap<PersistentEntitySectionManager.ChunkLoadStatus> chunkLoadStatuses = new Long2ObjectOpenHashMap<>();
++    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<Visibility> chunkVisibility = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
++    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<PersistentEntitySectionManager.ChunkLoadStatus> chunkLoadStatuses = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
+     private final LongSet chunksToUnload = new LongOpenHashSet();
+     private final Queue<ChunkEntities<T>> loadingInbox = Queues.newConcurrentLinkedQueue();
+ 
+     public PersistentEntitySectionManager(final Class<T> entityClass, final LevelCallback<T> callbacks, final EntityPersistentStorage<T> permanentStorage) {
+         this.visibleEntityStorage = new EntityLookup<>();
+-        this.sectionStorage = new EntitySectionStorage<>(entityClass, this.chunkVisibility);
+-        this.chunkVisibility.defaultReturnValue(Visibility.HIDDEN);
+-        this.chunkLoadStatuses.defaultReturnValue(PersistentEntitySectionManager.ChunkLoadStatus.FRESH);
++        for (int i = 0; i < this.latches.length; i++) {
++            this.latches[i] = new Object();
++        }
++
++        this.sectionStorage = new EntitySectionStorage<>(entityClass, chunkKey -> this.visibility(chunkKey));
+         this.callbacks = callbacks;
+         this.permanentStorage = permanentStorage;
+         this.entityGetter = new LevelEntityGetterAdapter<>(this.visibleEntityStorage, this.sectionStorage);
+     }
+ 
++    /** See {@link EntitySectionStorage#setBoxClock}. */
++    public void setBoxClock(final java.util.function.LongSupplier clock) {
++        this.sectionStorage.setBoxClock(clock);
++    }
++
++    private Visibility visibility(final long chunkKey) {
++        return this.chunkVisibility.getOrDefault(chunkKey, Visibility.HIDDEN);
++    }
++
++    private PersistentEntitySectionManager.ChunkLoadStatus loadStatus(final long chunkKey) {
++        return this.chunkLoadStatuses.getOrDefault(chunkKey, PersistentEntitySectionManager.ChunkLoadStatus.FRESH);
++    }
++
++    private Object latch(final long chunkKey) {
++        long h = chunkKey * 0x9E3779B97F4A7C15L;
++        return this.latches[(int)(h >>> 56) & (LATCH_STRIPES - 1)];
++    }
++
++    private static long chunkOfSection(final long sectionKey) {
++        return ChunkPos.pack(SectionPos.x(sectionKey), SectionPos.z(sectionKey));
++    }
++
+     private void removeSectionIfEmpty(final long sectionPos, final EntitySection<T> section) {
+         if (section.isEmpty()) {
+-            this.sectionStorage.remove(sectionPos);
++            this.sectionStorage.removeIfEmpty(sectionPos);
+         }
+     }
+ 
+@@ -77,20 +_,21 @@
+         }
+ 
+         long sectionKey = SectionPos.asLong(entity.blockPosition());
+-        EntitySection<T> entitySection = this.sectionStorage.getOrCreateSection(sectionKey);
+-        entitySection.add(entity);
+-        entity.setLevelCallback(new PersistentEntitySectionManager.Callback(entity, sectionKey, entitySection));
+-        if (!loaded) {
+-            this.callbacks.onCreated(entity);
+-        }
+-
+-        Visibility status = getEffectiveStatus(entity, entitySection.getStatus());
+-        if (status.isAccessible()) {
+-            this.startTracking(entity);
+-        }
+-
+-        if (status.isTicking()) {
+-            this.startTicking(entity);
++        synchronized (this.latch(chunkOfSection(sectionKey))) {
++            EntitySection<T> entitySection = this.sectionStorage.addToSection(sectionKey, entity);
++            entity.setLevelCallback(new PersistentEntitySectionManager.Callback(entity, sectionKey, entitySection));
++            if (!loaded) {
++                this.callbacks.onCreated(entity);
++            }
++
++            Visibility status = getEffectiveStatus(entity, entitySection.getStatus());
++            if (status.isAccessible()) {
++                this.startTracking(entity);
++            }
++
++            if (status.isTicking()) {
++                this.startTicking(entity);
++            }
+         }
+ 
+         return true;
+@@ -101,7 +_,7 @@
+     }
+ 
+     public boolean isTicking(final ChunkPos pos) {
+-        return this.chunkVisibility.get(pos.pack()).isTicking();
++        return this.visibility(pos.pack()).isTicking();
+     }
+ 
+     public void addLegacyChunkEntities(final Stream<T> entities) {
+@@ -136,6 +_,12 @@
+     }
+ 
+     public void updateChunkStatus(final ChunkPos pos, final Visibility chunkStatus) {
++        synchronized (this.latch(pos.pack())) {
++            this.updateChunkStatusLatched(pos, chunkStatus);
++        }
++    }
++
++    private void updateChunkStatusLatched(final ChunkPos pos, final Visibility chunkStatus) {
+         long chunkPosKey = pos.pack();
+         if (chunkStatus == Visibility.HIDDEN) {
+             this.chunkVisibility.remove(chunkPosKey);
+@@ -169,14 +_,14 @@
+     }
+ 
+     private void ensureChunkQueuedForLoad(final long chunkPos) {
+-        PersistentEntitySectionManager.ChunkLoadStatus chunkLoadStatus = this.chunkLoadStatuses.get(chunkPos);
++        PersistentEntitySectionManager.ChunkLoadStatus chunkLoadStatus = this.loadStatus(chunkPos);
+         if (chunkLoadStatus == PersistentEntitySectionManager.ChunkLoadStatus.FRESH) {
+             this.requestChunkLoad(chunkPos);
+         }
+     }
+ 
+     private boolean storeChunkSections(final long chunkPos, final Consumer<T> savedEntityVisitor) {
+-        PersistentEntitySectionManager.ChunkLoadStatus chunkLoadStatus = this.chunkLoadStatuses.get(chunkPos);
++        PersistentEntitySectionManager.ChunkLoadStatus chunkLoadStatus = this.loadStatus(chunkPos);
+         if (chunkLoadStatus == PersistentEntitySectionManager.ChunkLoadStatus.PENDING) {
+             return false;
+         }
+@@ -226,7 +_,13 @@
+     }
+ 
+     private void processUnloads() {
+-        this.chunksToUnload.removeIf(chunkKey -> this.chunkVisibility.get(chunkKey) != Visibility.HIDDEN || this.processChunkUnload(chunkKey));
++        // Unloading locks entities. While the server thread waits for a lock it runs chunk tasks,
++        // which can change chunk status and so this set; iterate a copy.
++        for (long chunkKey : this.chunksToUnload.toLongArray()) {
++            if (this.visibility(chunkKey) != Visibility.HIDDEN || this.processChunkUnload(chunkKey)) {
++                this.chunksToUnload.remove(chunkKey);
++            }
++        }
+     }
+ 
+     public void processPendingLoads() {
+@@ -245,7 +_,7 @@
+     private LongSet getAllChunksToSave() {
+         LongSet result = this.sectionStorage.getAllChunksWithExistingSections();
+ 
+-        for (Entry<PersistentEntitySectionManager.ChunkLoadStatus> entry : Long2ObjectMaps.fastIterable(this.chunkLoadStatuses)) {
++        for (it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<PersistentEntitySectionManager.ChunkLoadStatus> entry : this.chunkLoadStatuses.entriesSnapshot()) {
+             if (entry.getValue() == PersistentEntitySectionManager.ChunkLoadStatus.LOADED) {
+                 result.add(entry.getLongKey());
+             }
+@@ -256,7 +_,7 @@
+ 
+     public void autoSave() {
+         this.getAllChunksToSave().forEach(chunkKey -> {
+-            boolean shouldUnload = this.chunkVisibility.get(chunkKey) == Visibility.HIDDEN;
++            boolean shouldUnload = this.visibility(chunkKey) == Visibility.HIDDEN;
+             if (shouldUnload) {
+                 this.processChunkUnload(chunkKey);
+             } else {
+@@ -272,7 +_,7 @@
+             this.permanentStorage.flush(false);
+             this.processPendingLoads();
+             chunksToSave.removeIf(chunkKey -> {
+-                boolean shouldUnload = this.chunkVisibility.get(chunkKey) == Visibility.HIDDEN;
++                boolean shouldUnload = this.visibility(chunkKey) == Visibility.HIDDEN;
+                 return shouldUnload ? this.processChunkUnload(chunkKey) : this.storeChunkSections(chunkKey, e -> {});
+             });
+         }
+@@ -295,15 +_,15 @@
+     }
+ 
+     public boolean canPositionTick(final BlockPos pos) {
+-        return this.chunkVisibility.get(ChunkPos.pack(pos)).isTicking();
++        return this.visibility(ChunkPos.pack(pos)).isTicking();
+     }
+ 
+     public boolean canPositionTick(final ChunkPos pos) {
+-        return this.chunkVisibility.get(pos.pack()).isTicking();
++        return this.visibility(pos.pack()).isTicking();
+     }
+ 
+     public boolean areEntitiesLoaded(final long chunkKey) {
+-        return this.chunkLoadStatuses.get(chunkKey) == PersistentEntitySectionManager.ChunkLoadStatus.LOADED;
++        return this.loadStatus(chunkKey) == PersistentEntitySectionManager.ChunkLoadStatus.LOADED;
+     }
+ 
+     public void dumpSections(final Writer output) throws IOException {
+@@ -319,7 +_,7 @@
+             .getAllChunksWithExistingSections()
+             .forEach(
+                 chunkKey -> {
+-                    PersistentEntitySectionManager.ChunkLoadStatus loadStatus = this.chunkLoadStatuses.get(chunkKey);
++                    PersistentEntitySectionManager.ChunkLoadStatus loadStatus = this.loadStatus(chunkKey);
+                     this.sectionStorage
+                         .getExistingSectionPositionsInChunk(chunkKey)
+                         .forEach(
+@@ -371,6 +_,7 @@
+         private final T entity;
+         private long currentSectionKey;
+         private EntitySection<T> currentSection;
++        private volatile boolean detached;
+ 
+         private Callback(final T entity, final long currentSectionKey, final EntitySection<T> currentSection) {
+             this.entity = entity;
+@@ -383,6 +_,34 @@
+             BlockPos pos = this.entity.blockPosition();
+             long newSectionPos = SectionPos.asLong(pos);
+             if (newSectionPos != this.currentSectionKey) {
++                long oldChunk = PersistentEntitySectionManager.chunkOfSection(this.currentSectionKey);
++                long newChunk = PersistentEntitySectionManager.chunkOfSection(newSectionPos);
++                Object oldLatch = PersistentEntitySectionManager.this.latch(oldChunk);
++                Object newLatch = PersistentEntitySectionManager.this.latch(newChunk);
++                if (oldLatch == newLatch) {
++                    synchronized (oldLatch) {
++                        this.moveTo(newSectionPos);
++                    }
++                } else {
++                    // Lock both stripes in a fixed order so two entities crossing the same border
++                    // in opposite directions cannot deadlock.
++                    Object first = System.identityHashCode(oldLatch) < System.identityHashCode(newLatch) ? oldLatch : newLatch;
++                    Object second = first == oldLatch ? newLatch : oldLatch;
++                    synchronized (first) {
++                        synchronized (second) {
++                            this.moveTo(newSectionPos);
++                        }
++                    }
++                }
++            }
++        }
++
++        private void moveTo(final long newSectionPos) {
++            if (this.detached) {
++                return;
++            }
++
++            {
+                 Visibility previousStatus = this.currentSection.getStatus();
+                 if (!this.currentSection.remove(this.entity)) {
+                     PersistentEntitySectionManager.LOGGER
+@@ -390,8 +_,7 @@
+                 }
+ 
+                 PersistentEntitySectionManager.this.removeSectionIfEmpty(this.currentSectionKey, this.currentSection);
+-                EntitySection<T> newSection = PersistentEntitySectionManager.this.sectionStorage.getOrCreateSection(newSectionPos);
+-                newSection.add(this.entity);
++                EntitySection<T> newSection = PersistentEntitySectionManager.this.sectionStorage.addToSection(newSectionPos, this.entity);
+                 this.currentSection = newSection;
+                 this.currentSectionKey = newSectionPos;
+                 this.updateStatus(previousStatus, newSection.getStatus());
+@@ -430,6 +_,15 @@
+ 
+         @Override
+         public void onRemove(final Entity.RemovalReason reason) {
++            synchronized (PersistentEntitySectionManager.this.latch(PersistentEntitySectionManager.chunkOfSection(this.currentSectionKey))) {
++                if (!this.detached) {
++                    this.detached = true;
++                    this.onRemoveLatched(reason);
++                }
++            }
++        }
++
++        private void onRemoveLatched(final Entity.RemovalReason reason) {
+             if (!this.currentSection.remove(this.entity)) {
+                 PersistentEntitySectionManager.LOGGER
+                     .warn("Entity {} wasn't found in section {} (destroying due to {})", this.entity, SectionPos.of(this.currentSectionKey), reason);

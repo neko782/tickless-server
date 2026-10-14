@@ -1,0 +1,180 @@
+--- a/net/minecraft/world/level/ServerExplosion.java
++++ b/net/minecraft/world/level/ServerExplosion.java
+@@ -169,7 +_,11 @@
+         return new ObjectArrayList<>(toBlowSet);
+     }
+ 
+-    private void hurtEntities() {
++    // Entities in reach and their exposure, measured by measureEntities before blocks are blown.
++    private List<Entity> affected = List.of();
++    private it.unimi.dsi.fastutil.floats.FloatArrayList exposures = new it.unimi.dsi.fastutil.floats.FloatArrayList();
++
++    private void measureEntities() {
+         if (!(this.radius < 1.0E-5F)) {
+             float doubleRadius = this.radius * 2.0F;
+             int x0 = Mth.floor(this.center.x - doubleRadius - 1.0);
+@@ -179,36 +_,85 @@
+             int z0 = Mth.floor(this.center.z - doubleRadius - 1.0);
+             int z1 = Mth.floor(this.center.z + doubleRadius + 1.0);
+ 
+-            for (Entity entity : this.level.getEntities(this.source, new AABB(x0, y0, z0, x1, y1, z1))) {
+-                if (!entity.ignoreExplosion(this)) {
+-                    double dist = Math.sqrt(entity.distanceToSqr(this.center)) / doubleRadius;
+-                    if (!(dist > 1.0)) {
+-                        Vec3 entityOrigin = entity instanceof PrimedTnt ? entity.position() : entity.getEyePosition();
+-                        Vec3 direction = entityOrigin.subtract(this.center).normalize();
+-                        boolean shouldDamageEntity = this.damageCalculator.shouldDamageEntity(this, entity);
+-                        float knockbackMultiplier = this.damageCalculator.getKnockbackMultiplier(entity);
+-                        float exposure = !shouldDamageEntity && knockbackMultiplier == 0.0F ? 0.0F : getSeenPercent(this.center, entity);
+-                        if (shouldDamageEntity && (this.source == null || this.source.doTeamsAllowDamage(entity))) {
+-                            entity.hurtServer(this.level, this.damageSource, this.damageCalculator.getEntityDamageAmount(this, entity, exposure));
+-                        }
+-
+-                        double knockbackResistance = entity instanceof LivingEntity livingEntity
+-                            ? livingEntity.getAttributeValue(Attributes.EXPLOSION_KNOCKBACK_RESISTANCE)
+-                            : 0.0;
+-                        double knockbackPower = (1.0 - dist) * exposure * knockbackMultiplier * (1.0 - knockbackResistance);
+-                        Vec3 knockback = direction.scale(knockbackPower);
+-                        entity.pushFromExplosion(knockback);
+-                        if (entity.is(EntityTypeTags.REDIRECTABLE_PROJECTILE) && entity instanceof Projectile projectile) {
+-                            projectile.setOwner(this.damageSource.getEntity());
+-                        } else if (entity instanceof Player player && !player.isSpectator() && (!player.isCreative() || !player.getAbilities().flying)) {
+-                            this.hitPlayers.put(player, knockback);
+-                        }
+-
+-                        entity.onExplosionHit(this.source);
+-                    }
+-                }
+-            }
+-        }
++            // Measure every entity's exposure before touching any of them. The ray casts are the
++            // slow part (a big explosion reads blocks far away and can wait for chunk loads);
++            // done between hits, they kept each entity hit so far locked, so explosions that
++            // reached each other's fireballs ran one after another.
++            List<Entity> candidates = this.level.getEntities(this.source, new AABB(x0, y0, z0, x1, y1, z1));
++            List<Entity> affected = new ArrayList<>(candidates.size());
++            it.unimi.dsi.fastutil.floats.FloatArrayList exposures = new it.unimi.dsi.fastutil.floats.FloatArrayList(candidates.size());
++            this.affected = affected;
++            this.exposures = exposures;
++            for (Entity entity : candidates) {
++                if (!entity.ignoreExplosion(this) && !(Math.sqrt(entity.distanceToSqr(this.center)) / doubleRadius > 1.0)) {
++                    boolean shouldDamageEntity = this.damageCalculator.shouldDamageEntity(this, entity);
++                    float knockbackMultiplier = this.damageCalculator.getKnockbackMultiplier(entity);
++                    affected.add(entity);
++                    exposures.add(!shouldDamageEntity && knockbackMultiplier == 0.0F ? 0.0F : getSeenPercent(this.center, entity));
++                }
++            }
++        }
++    }
++
++    /**
++     * Damages and knocks back the entities measured before. This runs after blocks are blown, at
++     * the end of the event: hitting an entity locks it until the event ends, and a big explosion
++     * that hit entities first held hundreds of them while it broke blocks, so explosions that
++     * reached each other's fireballs waited on each other for seconds. Exposure was measured
++     * with the blocks still there, as in vanilla, and blocks dropped by this explosion are not hit.
++     */
++    private void hurtEntities() {
++        if (!(this.radius < 1.0E-5F)) {
++            float doubleRadius = this.radius * 2.0F;
++            List<Entity> affected = this.affected;
++            it.unimi.dsi.fastutil.floats.FloatArrayList exposures = this.exposures;
++            for (int i = 0; i < affected.size(); i++) {
++                Entity entity = affected.get(i);
++                // An entity whose own explosion is running is gone once it ends (fireballs, TNT, creepers).
++                if (entity.isRemoved() || entity.exploding.get()) {
++                    continue;
++                }
++
++                int index = i;
++                // Each hit commits on its own; see WorldTxn.scoped.
++                net.minecraft.world.level.parallel.WorldTxn.scoped(() -> this.hitEntity(entity, exposures.getFloat(index), doubleRadius));
++            }
++        }
++    }
++
++    private void hitEntity(final Entity entity, final float exposure, final float doubleRadius) {
++        double dist = Math.sqrt(entity.distanceToSqr(this.center)) / doubleRadius;
++        if (dist > 1.0) {
++            return;
++        }
++
++        Vec3 entityOrigin = entity instanceof PrimedTnt ? entity.position() : entity.getEyePosition();
++        Vec3 direction = entityOrigin.subtract(this.center).normalize();
++        boolean shouldDamageEntity = this.damageCalculator.shouldDamageEntity(this, entity);
++        float knockbackMultiplier = this.damageCalculator.getKnockbackMultiplier(entity);
++        if (shouldDamageEntity && (this.source == null || this.source.doTeamsAllowDamage(entity))) {
++            entity.hurtServer(this.level, this.damageSource, this.damageCalculator.getEntityDamageAmount(this, entity, exposure));
++        }
++
++        double knockbackResistance = entity instanceof LivingEntity livingEntity
++            ? livingEntity.getAttributeValue(Attributes.EXPLOSION_KNOCKBACK_RESISTANCE)
++            : 0.0;
++        double knockbackPower = (1.0 - dist) * exposure * knockbackMultiplier * (1.0 - knockbackResistance);
++        Vec3 knockback = direction.scale(knockbackPower);
++        // Knockback without the entity's lock: in a TNT chain every explosion pushes
++        // hundreds of primed TNT, and locking them serialized the explosions. A lost
++        // nudge is not visible; damage above still locks.
++        net.minecraft.world.level.parallel.WorldOwnership.racy(() -> entity.pushFromExplosion(knockback));
++        if (entity.is(EntityTypeTags.REDIRECTABLE_PROJECTILE) && entity instanceof Projectile projectile) {
++            // Who gets credit for a deflected fireball, set without its lock: a fireball's lock is held
++            // by its own update for as long as its explosion runs, and a hundred of them hitting each
++            // other waited one after another while every mob they hit waited behind them.
++            net.minecraft.world.level.parallel.WorldOwnership.racy(() -> projectile.setOwner(this.damageSource.getEntity()));
++        } else if (entity instanceof Player player && !player.isSpectator() && (!player.isCreative() || !player.getAbilities().flying)) {
++            this.hitPlayers.put(player, knockback);
++        }
++
++        entity.onExplosionHit(this.source);
+     }
+ 
+     private void interactWithBlocks(final List<BlockPos> targetBlocks) {
+@@ -216,26 +_,34 @@
+         Util.shuffle(targetBlocks, this.level.random);
+ 
+         for (BlockPos pos : targetBlocks) {
+-            this.level.getBlockState(pos).onExplosionHit(this.level, pos, this, (stackx, position) -> addOrAppendStack(stacks, stackx, position));
++            // Each broken block commits on its own; see WorldTxn.scoped.
++            net.minecraft.world.level.parallel.WorldTxn.scoped(
++                () -> this.level.getBlockState(pos).onExplosionHit(this.level, pos, this, (stackx, position) -> addOrAppendStack(stacks, stackx, position))
++            );
+         }
+ 
+         for (ServerExplosion.StackCollector stack : stacks) {
+-            Block.popResource(this.level, stack.pos, stack.stack);
++            net.minecraft.world.level.parallel.WorldTxn.scoped(() -> Block.popResource(this.level, stack.pos, stack.stack));
+         }
+     }
+ 
+     private void createFire(final List<BlockPos> targetBlocks) {
+         for (BlockPos pos : targetBlocks) {
+-            if (this.level.random.nextInt(3) == 0 && this.level.getBlockState(pos).isAir() && this.level.getBlockState(pos.below()).isSolidRender()) {
+-                this.level.setBlockAndUpdate(pos, BaseFireBlock.getState(this.level, pos));
+-            }
++            // Each fire block is committed once placed. Kept to the end of the event, a big fireball's
++            // fire held thousands of block locks while it hit entities, and explosions that needed
++            // each other's blocks waited on each other for minutes.
++            net.minecraft.world.level.parallel.WorldTxn.scoped(() -> {
++                if (this.level.random.nextInt(3) == 0 && this.level.getBlockState(pos).isAir() && this.level.getBlockState(pos.below()).isSolidRender()) {
++                    this.level.setBlockAndUpdate(pos, BaseFireBlock.getState(this.level, pos));
++                }
++            });
+         }
+     }
+ 
+     public int explode() {
+         this.level.gameEvent(this.source, GameEvent.EXPLODE, this.center);
+         List<BlockPos> toBlow = this.calculateExplodedPositions();
+-        this.hurtEntities();
++        this.measureEntities();
+         if (this.interactsWithBlocks()) {
+             ProfilerFiller profiler = Profiler.get();
+             profiler.push("explosion_blocks");
+@@ -247,6 +_,7 @@
+             this.createFire(toBlow);
+         }
+ 
++        this.hurtEntities();
+         return toBlow.size();
+     }
+ 

@@ -1,0 +1,29 @@
+--- a/net/minecraft/gametest/framework/GameTestServer.java
++++ b/net/minecraft/gametest/framework/GameTestServer.java
+@@ -15,7 +_,6 @@
+ import java.util.Set;
+ import java.util.UUID;
+ import java.util.concurrent.TimeUnit;
+-import java.util.function.BooleanSupplier;
+ import java.util.stream.Stream;
+ import java.util.stream.Stream.Builder;
+ import net.minecraft.CrashReport;
+@@ -179,6 +_,7 @@
+         Gizmos.withCollector(GizmoCollector.NOOP);
+         this.loadLevel();
+         this.testBatches = this.evaluateTestsToRun(this);
++        this.overworld().eventScheduler().addPeriodicEvent(this::updateGameTests, "game test run", true);
+         LOGGER.info("Started game test server");
+         return true;
+     }
+@@ -240,9 +_,7 @@
+         return builder.build();
+     }
+ 
+-    @Override
+-    protected void tickServer(final BooleanSupplier haveTime) {
+-        super.tickServer(haveTime);
++    private void updateGameTests() {
+         ServerLevel level = this.overworld();
+         if (!this.haveTestsStarted()) {
+             this.startTests(level);

@@ -1,0 +1,26 @@
+--- a/net/minecraft/world/level/entity/EntityTypeTest.java
++++ b/net/minecraft/world/level/entity/EntityTypeTest.java
+@@ -11,6 +_,11 @@
+             }
+ 
+             @Override
++            public boolean isPureClassTest() {
++                return true;
++            }
++
++            @Override
+             public Class<? extends B> getBaseClass() {
+                 return cls;
+             }
+@@ -29,6 +_,11 @@
+                 return cls;
+             }
+         };
++    }
++
++    /** Whether membership in getBaseClass is the complete predicate, including subclasses. */
++    default boolean isPureClassTest() {
++        return false;
+     }
+ 
+     @Nullable T tryCast(B entity);

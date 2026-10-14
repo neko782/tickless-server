@@ -1,0 +1,26 @@
+--- a/net/minecraft/world/entity/vehicle/minecart/AbstractMinecart.java
++++ b/net/minecraft/world/entity/vehicle/minecart/AbstractMinecart.java
+@@ -526,12 +_,17 @@
+                         za *= 0.1F;
+                         xa *= 0.5;
+                         za *= 0.5;
+-                        if (entity instanceof AbstractMinecart otherMinecart) {
+-                            this.pushOtherMinecart(otherMinecart, xa, za);
+-                        } else {
+-                            this.push(-xa, 0.0, -za);
+-                            entity.push(xa / 4.0, 0.0, za / 4.0);
+-                        }
++                        // Collision nudges go to the other entity without its lock, like mob pushing.
++                        double pushX = xa;
++                        double pushZ = za;
++                        net.minecraft.world.level.parallel.WorldOwnership.racy(() -> {
++                            if (entity instanceof AbstractMinecart otherMinecart) {
++                                this.pushOtherMinecart(otherMinecart, pushX, pushZ);
++                            } else {
++                                this.push(-pushX, 0.0, -pushZ);
++                                entity.push(pushX / 4.0, 0.0, pushZ / 4.0);
++                            }
++                        });
+                     }
+                 }
+             }

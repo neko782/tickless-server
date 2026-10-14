@@ -1,0 +1,834 @@
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -38,7 +_,6 @@
+ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.concurrent.locks.LockSupport;
+-import java.util.function.BooleanSupplier;
+ import java.util.function.Consumer;
+ import java.util.function.Function;
+ import java.util.function.Supplier;
+@@ -171,6 +_,9 @@
+ import net.minecraft.world.level.levelgen.WorldOptions;
+ import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+ import net.minecraft.world.level.saveddata.WeatherData;
++import net.minecraft.server.level.LevelEventScheduler;
++import net.minecraft.world.level.parallel.WorldTxn;
++import net.minecraft.world.level.parallel.WorldWorkers;
+ import net.minecraft.world.level.storage.CommandStorage;
+ import net.minecraft.world.level.storage.DerivedLevelData;
+ import net.minecraft.world.level.storage.LevelData;
+@@ -190,20 +_,13 @@
+ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTask> implements CommandSource, ServerInfo, ChunkIOErrorReporter {
+     private static final Logger LOGGER = LogUtils.getLogger();
+     public static final String VANILLA_BRAND = "vanilla";
+-    private static final float AVERAGE_TICK_TIME_SMOOTHING = 0.8F;
+-    private static final int TICK_STATS_SPAN = 100;
+     private static final long OVERLOADED_THRESHOLD_NANOS = 20L * TimeUtil.NANOSECONDS_PER_SECOND / 20L;
+-    private static final int OVERLOADED_TICKS_THRESHOLD = 20;
+     private static final long OVERLOADED_WARNING_INTERVAL_NANOS = 10L * TimeUtil.NANOSECONDS_PER_SECOND;
+-    private static final int OVERLOADED_TICKS_WARNING_INTERVAL = 100;
+     private static final long STATUS_EXPIRE_TIME_NANOS = 5L * TimeUtil.NANOSECONDS_PER_SECOND;
+     private static final long PREPARE_LEVELS_DEFAULT_DELAY_NANOS = 10L * TimeUtil.NANOSECONDS_PER_MILLISECOND;
+     private static final int MAX_STATUS_PLAYER_SAMPLE = 12;
+     public static final int SPAWN_POSITION_SEARCH_RADIUS = 5;
+     private static final int SERVER_ACTIVITY_MONITOR_SECONDS_BETWEEN_NOTIFICATIONS = 30;
+-    private static final int AUTOSAVE_INTERVAL = 6000;
+-    private static final int MIMINUM_AUTOSAVE_TICKS = 100;
+-    private static final int MAX_TICK_LATENCY = 3;
+     public static final int ABSOLUTE_MAX_WORLD_SIZE = 29999984;
+     public static final LevelSettings DEMO_SETTINGS = new LevelSettings(
+         "Demo World", GameType.SURVIVAL, LevelSettings.DifficultySettings.DEFAULT, false, WorldDataConfiguration.DEFAULT
+@@ -235,8 +_,8 @@
+     private PlayerList playerList;
+     private volatile boolean running = true;
+     private boolean stopped;
+-    private int tickCount;
+-    private int ticksUntilAutosave = 6000;
++    private volatile int tickCount;
++    private long nextAutosaveNanos;
+     protected final Proxy proxy;
+     private boolean onlineMode;
+     private boolean preventProxyConnections;
+@@ -257,10 +_,22 @@
+     private long lastTickNanos = Util.getNanos();
+     private long taskExecutionStartNanos = Util.getNanos();
+     private long idleTimeNanos;
+-    private long nextTickTimeNanos = Util.getNanos();
++    private volatile long nextTickTimeNanos = Util.getNanos();
++    private long nextNetworkTimeNanos = Util.getNanos();
++    private final java.util.concurrent.atomic.AtomicBoolean simulationPending = new java.util.concurrent.atomic.AtomicBoolean();
++    private final java.util.concurrent.ScheduledThreadPoolExecutor simulationTimers = new java.util.concurrent.ScheduledThreadPoolExecutor(1, runnable -> {
++        Thread thread = new Thread(runnable, "Simulation timer");
++        thread.setDaemon(true);
++        return thread;
++    });
++    private java.util.concurrent.ScheduledFuture<?> simulationFuture;
++    private volatile boolean simulationTimersStarted;
++    private volatile @Nullable ReportedException maintenanceCrash;
++    private static final long WORLD_MAINTENANCE_BUDGET_NANOS = 5L * TimeUtil.NANOSECONDS_PER_MILLISECOND;
++    private boolean runningSimulation;
++    private boolean networkLoopActive;
+     private boolean waitingForNextTick = false;
+-    private long delayedTasksMaxNextTickTimeNanos;
+-    private boolean mayHaveDelayedTasks;
++    private static final long NETWORK_INTERVAL_NANOS = TimeUtil.NANOSECONDS_PER_SECOND / 20L;
+     private final PackRepository packRepository;
+     private final WorldGenSettings worldGenSettings;
+     private final ServerScoreboard scoreboard = new ServerScoreboard(this);
+@@ -281,11 +_,14 @@
+     private final ServerDebugSubscribers debugSubscribers = new ServerDebugSubscribers(this);
+     protected final WorldData worldData;
+     private LevelData.RespawnData effectiveRespawnData = LevelData.RespawnData.DEFAULT;
+-    private int emptyTicks;
++    private long emptySinceNanos = -1L;
++    private boolean pausedForEmptyServer;
++    private long lastTimeSyncNanos;
+     private volatile boolean isSaving;
+     private final SuppressedExceptionCollector suppressedExceptions = new SuppressedExceptionCollector();
+     private final DiscontinuousFrame tickFrame;
+     private final PacketProcessor packetProcessor;
++    private final WorldWorkers worldWorkers = new WorldWorkers(WorldWorkers.defaultThreadCount());
+     private final TimerQueue<MinecraftServer> scheduledEvents;
+     private final ServerClockManager clockManager;
+ 
+@@ -317,6 +_,7 @@
+         final NotificationManager notificationManager
+     ) {
+         super("Server", propagatesCrashes);
++        this.simulationTimers.setRemoveOnCancelPolicy(true);
+         this.registries = worldStem.registries();
+         if (!this.registries.compositeAccess().lookupOrThrow(Registries.LEVEL_STEM).containsKey(LevelStem.OVERWORLD)) {
+             throw new IllegalStateException("Missing Overworld dimension data");
+@@ -623,7 +_,103 @@
+         this.stopServer();
+     }
+ 
++    private static final long WORLD_STATS_INTERVAL_NANOS = Long.getLong("tickless.statsIntervalSeconds", 0L) * TimeUtil.NANOSECONDS_PER_SECOND;
++    private long lastStatsEvents;
++    private int lastStatsSimulationSteps;
++    private long lastChunkRequests;
++    private long lastEntityRequests;
++    private long lastSkippedChunkSteps;
++    private long lastSkippedEntitySteps;
++    private long lastStatsNanos;
++    private long lastServerThreadCpuNanos;
++    private long nextStatsNanos;
++
++    private void logWorldStats() {
++        long now = Util.getNanos();
++        long events = this.worldWorkers.events.sum();
++        double seconds = (now - this.lastStatsNanos) / 1.0E9;
++        long chunkRequests = 0L;
++        long skippedChunkSteps = 0L;
++        long entityRequests = 0L;
++        long skippedEntitySteps = 0L;
++        long completedEntitySteps = 0L;
++        int entities = 0;
++        int loadedChunks = 0;
++
++        for (ServerLevel level : this.getAllLevels()) {
++            loadedChunks += level.getChunkSource().getLoadedChunksCount();
++            LevelEventScheduler scheduler = level.eventScheduler();
++            chunkRequests += scheduler.chunkRequests.sum();
++            skippedChunkSteps += scheduler.skippedChunkSteps.sum();
++            entityRequests += scheduler.entityRequests.sum();
++            skippedEntitySteps += scheduler.skippedEntitySteps.sum();
++            entities += scheduler.tickingEntityCount();
++            completedEntitySteps += scheduler.completedEntitySteps.sum();
++        }
++
++        // This runs on the server thread, so its CPU time is the current thread's.
++        long serverThreadCpu = java.lang.management.ManagementFactory.getThreadMXBean().getCurrentThreadCpuTime();
++        // Scale the fraction of requests that ran by the measured simulation timer rate.
++        long chunkDelta = chunkRequests - this.lastChunkRequests;
++        long entityDelta = entityRequests - this.lastEntityRequests;
++        double simulationRate = Integer.toUnsignedLong(this.tickCount - this.lastStatsSimulationSteps) / seconds;
++        double chunkRate = chunkDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedChunkSteps - this.lastSkippedChunkSteps) / chunkDelta);
++        double entityRate = entityDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedEntitySteps - this.lastSkippedEntitySteps) / entityDelta);
++        LOGGER.info(
++            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}",
++            String.format(java.util.Locale.ROOT, "%.0f", (events - this.lastStatsEvents) / seconds),
++            String.format(java.util.Locale.ROOT, "%.2f", chunkRate),
++            String.format(java.util.Locale.ROOT, "%.2f", entityRate),
++            String.format(java.util.Locale.ROOT, "%.0f", (serverThreadCpu - this.lastServerThreadCpuNanos) / 1.0E7 / seconds),
++            this.worldWorkers.pendingTasks(),
++            entities,
++            loadedChunks,
++            WorldTxn.ABORTS.sum(),
++            WorldTxn.WOUNDS.sum(),
++            this.worldWorkers.failures.sum(),
++            completedEntitySteps
++        );
++        this.lastStatsEvents = events;
++        this.lastStatsSimulationSteps = this.tickCount;
++        this.lastStatsNanos = now;
++        this.lastServerThreadCpuNanos = serverThreadCpu;
++        this.lastChunkRequests = chunkRequests;
++        this.lastEntityRequests = entityRequests;
++        this.lastSkippedChunkSteps = skippedChunkSteps;
++        this.lastSkippedEntitySteps = skippedEntitySteps;
++    }
++
++    public WorldWorkers worldWorkers() {
++        return this.worldWorkers;
++    }
++
++    /** Runs pending chunk tasks for all levels once. World workers can be waiting on them. */
++    private void pumpChunkTasks() {
++        for (ServerLevel level : this.getAllLevels()) {
++            level.getChunkSource().pollTask();
++        }
++    }
++
++    /** Waits until no world event is queued or running, serving chunk loads workers wait for. */
++    private void drainWorldWorkers() {
++        WorldTxn.mainSafePoint();
++        while (!this.worldWorkers.isQuiescent()) {
++            // Events waiting at their gate for exclusive work only drain once it has run.
++            WorldTxn.pollExclusive();
++            this.pumpChunkTasks();
++            LockSupport.parkNanos(100_000L);
++        }
++    }
++
+     protected void stopServer() {
++        if (WorldTxn.isEnabled()) {
++            for (ServerLevel level : this.getAllLevels()) {
++                level.eventScheduler().stopTimers();
++            }
++            this.drainWorldWorkers();
++            WorldTxn.disable();
++        }
++
+         this.packetProcessor.close();
+         if (this.metricsRecorder.isRecording()) {
+             this.cancelRecordingMetrics();
+@@ -646,17 +_,32 @@
+             }
+         }
+ 
++        long nextWorkReport = Util.getNanos() + 10L * TimeUtil.NANOSECONDS_PER_SECOND;
+         while (this.levels.values().stream().anyMatch(l -> l.getChunkSource().chunkMap.hasWork())) {
+-            this.nextTickTimeNanos = Util.getNanos() + TimeUtil.NANOSECONDS_PER_MILLISECOND;
++            long drainDeadline = Util.getNanos() + TimeUtil.NANOSECONDS_PER_MILLISECOND;
++            this.nextTickTimeNanos = drainDeadline;
++            if (Util.getNanos() - nextWorkReport >= 0L) {
++                nextWorkReport += 10L * TimeUtil.NANOSECONDS_PER_SECOND;
++                for (ServerLevel level : this.getAllLevels()) {
++                    String work = level.getChunkSource().chunkMap.describeWork();
++                    if (!work.isEmpty()) {
++                        LOGGER.warn("Still waiting to stop {}: {}", level.dimension().identifier(), work);
++                    }
++                }
++            }
+ 
+             for (ServerLevel level : this.getAllLevels()) {
+                 level.getChunkSource().deactivateTicketsOnClosing();
+                 level.getChunkSource().tick(() -> true, false);
+             }
+ 
+-            this.waitUntilNextTick();
++            // Shutdown has its own deadline. Queued simulation work can change the shared
++            // next-tick time while it is drained; normal cadence/reentrancy rules must not
++            // keep this wait alive and prevent the next chunk drain/report iteration.
++            this.managedBlock(() -> Util.getNanos() >= drainDeadline);
+         }
+ 
++        net.minecraft.world.level.parallel.WorldOwnership.logSummary();
+         this.saveAllChunks(false, true, false);
+ 
+         for (ServerLevel level : this.getAllLevels()) {
+@@ -694,6 +_,8 @@
+ 
+     public void halt(final boolean wait) {
+         this.running = false;
++        this.simulationTimers.shutdownNow();
++        LockSupport.unpark(this.serverThread);
+         if (wait) {
+             try {
+                 this.serverThread.join();
+@@ -710,60 +_,63 @@
+             }
+ 
+             this.nextTickTimeNanos = Util.getNanos();
++            this.nextNetworkTimeNanos = this.nextTickTimeNanos;
++            this.nextAutosaveNanos = this.nextTickTimeNanos + 300L * TimeUtil.NANOSECONDS_PER_SECOND;
++            this.lastTimeSyncNanos = this.nextTickTimeNanos;
++            this.lastStatsNanos = this.nextTickTimeNanos;
++            this.nextStatsNanos = WORLD_STATS_INTERVAL_NANOS > 0L
++                ? this.nextTickTimeNanos + WORLD_STATS_INTERVAL_NANOS
++                : Long.MAX_VALUE;
++            // World events run on world workers from here on. The server thread keeps the clock,
++            // the chunk system, networking and players.
++            WorldTxn.enable(Thread.currentThread(), this::pumpChunkTasks);
++            ServerLevel primaryLevel = this.overworld();
++            primaryLevel.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(this.getFunctions()::tick, "Exception ticking command functions", null), "command functions", true);
++            primaryLevel.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(() -> {
++                if (this.tickRateManager.runsNormally()) {
++                    GameTestTicker.SINGLETON.tick();
++                }
++            }, "Exception ticking game tests", null), "game tests", true);
++            primaryLevel.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(this::updateEffectiveRespawnData, "Exception updating respawn data", null), "respawn data", true);
++            primaryLevel.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(() -> {
++                for (Runnable tickable : this.tickables) {
++                    tickable.run();
++                }
++            }, "Exception ticking server tickables", null), "server tickables", true);
++            primaryLevel.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(this.serverActivityMonitor::tick, "Exception ticking server activity", null), "server activity", true);
++            for (ServerLevel level : this.getAllLevels()) {
++                level.eventScheduler().addPeriodicEvent(() -> this.runOrCrash(() -> {
++                    long deadline = Util.getNanos() + WORLD_MAINTENANCE_BUDGET_NANOS;
++                    level.tick(() -> Util.getNanos() - deadline < 0L);
++                    WorldTxn.mainSafePoint();
++                }, "Exception maintaining world", level), "world maintenance", true);
++                level.eventScheduler().startTimers();
++            }
++            LOGGER.info("Running world events on {} {}", this.worldWorkers.threads(), this.worldWorkers.isVirtual() ? "virtual thread carriers" : "world worker threads");
+             this.statusIcon = this.loadStatusIcon().orElse(null);
+             this.status = this.buildServerStatus();
++            this.simulationTimersStarted = true;
++            this.scheduleSimulation();
++            this.networkLoopActive = true;
+ 
+             while (this.running) {
+-                long thisTickNanos;
+-                if (!this.isPaused() && this.tickRateManager.isSprinting() && this.tickRateManager.checkShouldSprintThisTick()) {
+-                    thisTickNanos = 0L;
+-                    this.nextTickTimeNanos = Util.getNanos();
+-                    this.lastOverloadWarningNanos = this.nextTickTimeNanos;
+-                } else {
+-                    thisTickNanos = this.tickRateManager.nanosecondsPerTick();
+-                    long behindTimeNanos = Util.getNanos() - this.nextTickTimeNanos;
+-                    if (behindTimeNanos > OVERLOADED_THRESHOLD_NANOS + 20L * thisTickNanos
+-                        && this.nextTickTimeNanos - this.lastOverloadWarningNanos >= OVERLOADED_WARNING_INTERVAL_NANOS + 100L * thisTickNanos) {
+-                        long ticks = behindTimeNanos / thisTickNanos;
+-                        LOGGER.warn(
+-                            "Can't keep up! Is the server overloaded? Running {}ms or {} ticks behind",
+-                            behindTimeNanos / TimeUtil.NANOSECONDS_PER_MILLISECOND,
+-                            ticks
+-                        );
+-                        this.nextTickTimeNanos += ticks * thisTickNanos;
+-                        this.lastOverloadWarningNanos = this.nextTickTimeNanos;
+-                    }
+-                }
+-
+-                boolean sprinting = thisTickNanos == 0L;
+-                if (this.debugCommandProfilerDelayStart) {
+-                    this.debugCommandProfilerDelayStart = false;
+-                    this.debugCommandProfiler = new MinecraftServer.TimeProfiler(Util.getNanos(), this.tickCount);
+-                }
+-
+-                this.nextTickTimeNanos += thisTickNanos;
+-
+-                try (Profiler.Scope ignored = Profiler.use(this.createProfiler())) {
+-                    this.processPacketsAndTick(sprinting);
+-                    ProfilerFiller profiler = Profiler.get();
+-                    profiler.push("nextTickWait");
+-                    this.mayHaveDelayedTasks = true;
+-                    this.delayedTasksMaxNextTickTimeNanos = Math.max(Util.getNanos() + thisTickNanos, this.nextTickTimeNanos);
+-                    this.startMeasuringTaskExecutionTime();
+-                    this.waitUntilNextTick();
+-                    this.finishMeasuringTaskExecutionTime();
+-                    if (sprinting) {
+-                        this.tickRateManager.endTickWork();
+-                    }
+-
+-                    profiler.pop();
+-                    this.logFullTickTime();
+-                } finally {
+-                    this.endMetricsRecordingTick();
+-                }
+-
+-                this.isReady = true;
+-                JvmProfiler.INSTANCE.onServerTick(this.smoothedTickTimeMillis);
++                ReportedException maintenanceCrash = this.maintenanceCrash;
++                if (maintenanceCrash != null) {
++                    throw maintenanceCrash;
++                }
++                long now = Util.getNanos();
++                if (now - this.nextNetworkTimeNanos >= 0L) {
++                    // The fixed cadence is only for packet and connection compatibility.
++                    this.nextNetworkTimeNanos += ((now - this.nextNetworkTimeNanos) / NETWORK_INTERVAL_NANOS + 1L) * NETWORK_INTERVAL_NANOS;
++                    try (Profiler.Scope ignored = Profiler.use(this.createProfiler())) {
++                        this.processNetwork();
++                    }
++                    this.isReady = true;
++                }
++
++                this.startMeasuringTaskExecutionTime();
++                this.waitUntilNextTick();
++                this.finishMeasuringTaskExecutionTime();
+             }
+         } catch (Throwable t) {
+             LOGGER.error("Encountered an unexpected exception", t);
+@@ -778,6 +_,9 @@
+ 
+             this.onServerCrash(report);
+         } finally {
++            this.running = false;
++            this.networkLoopActive = false;
++            this.simulationTimers.shutdownNow();
+             try {
+                 this.stopped = true;
+                 this.stopServer();
+@@ -798,6 +_,103 @@
+         this.lastTickNanos = currentTime;
+     }
+ 
++    /**
++     * Runs a server-thread callback and hands any failure to the network loop, which saves the
++     * crash report and stops the server. Task errors would otherwise only be logged.
++     */
++    private void runOrCrash(final Runnable action, final String description, final @Nullable ServerLevel level) {
++        if (this.maintenanceCrash != null) {
++            return;
++        }
++        try {
++            action.run();
++        } catch (Throwable error) {
++            CrashReport report = CrashReport.forThrowable(error, description);
++            if (level != null) {
++                level.fillReportDetails(report);
++            }
++            this.maintenanceCrash = new ReportedException(report);
++            LockSupport.unpark(this.serverThread);
++        }
++    }
++
++    private synchronized void scheduleSimulation() {
++        if (!this.running || !this.simulationTimersStarted || this.simulationTimers.isShutdown() || this.simulationPending.get()) {
++            return;
++        }
++        if (this.simulationFuture != null) {
++            this.simulationFuture.cancel(false);
++        }
++        long delay = Math.max(0L, this.nextTickTimeNanos - Util.getNanos());
++        try {
++            this.simulationFuture = this.simulationTimers.schedule(this::requestSimulation, delay, java.util.concurrent.TimeUnit.NANOSECONDS);
++        } catch (RejectedExecutionException e) {
++            // halt() shut the timer down concurrently.
++        }
++    }
++
++    private void requestSimulation() {
++        if (!this.simulationPending.compareAndSet(false, true)) {
++            return;
++        }
++        try {
++            this.execute(() -> {
++                try {
++                    this.runScheduledSimulation();
++                } finally {
++                    this.simulationPending.set(false);
++                    this.scheduleSimulation();
++                }
++            });
++        } catch (RejectedExecutionException e) {
++            this.simulationPending.set(false);
++        }
++    }
++
++    private void runScheduledSimulation() {
++        long now = Util.getNanos();
++        boolean sprinting = !this.isPaused() && this.tickRateManager.isSprinting() && this.tickRateManager.checkShouldSprintThisTick();
++        long simulationInterval = this.tickRateManager.nanosecondsPerTick();
++        if (sprinting) {
++            this.nextTickTimeNanos = now;
++            this.lastOverloadWarningNanos = now;
++        } else {
++            long behindTimeNanos = Math.max(0L, now - this.nextTickTimeNanos);
++            if (behindTimeNanos > OVERLOADED_THRESHOLD_NANOS + 20L * simulationInterval
++                && now - this.lastOverloadWarningNanos >= OVERLOADED_WARNING_INTERVAL_NANOS) {
++                LOGGER.warn(
++                    "Can't keep up! Is the server overloaded? Running {}ms or {} simulation steps behind",
++                    behindTimeNanos / TimeUtil.NANOSECONDS_PER_MILLISECOND,
++                    behindTimeNanos / simulationInterval
++                );
++                this.lastOverloadWarningNanos = now;
++            }
++            this.nextTickTimeNanos += (behindTimeNanos / simulationInterval + 1L) * simulationInterval;
++        }
++
++        if (this.debugCommandProfilerDelayStart) {
++            this.debugCommandProfilerDelayStart = false;
++            this.debugCommandProfiler = new MinecraftServer.TimeProfiler(now, this.tickCount);
++        }
++
++        this.runningSimulation = true;
++        try {
++            try (Profiler.Scope ignored = Profiler.use(this.createProfiler())) {
++                this.processSimulation();
++                this.logFullTickTime();
++            } finally {
++                this.endMetricsRecordingTick();
++            }
++        } finally {
++            this.runningSimulation = false;
++        }
++        if (sprinting) {
++            this.tickRateManager.endTickWork();
++        }
++        this.isReady = true;
++        JvmProfiler.INSTANCE.onServerTick(this.smoothedTickTimeMillis);
++    }
++
+     private void startMeasuringTaskExecutionTime() {
+         if (this.isTickTimeLoggingEnabled()) {
+             this.taskExecutionStartNanos = Util.getNanos();
+@@ -836,7 +_,11 @@
+     }
+ 
+     private boolean haveTime() {
+-        return this.runningTask() || Util.getNanos() < (this.mayHaveDelayedTasks ? this.delayedTasksMaxNextTickTimeNanos : this.nextTickTimeNanos);
++        return (!this.runningSimulation && this.runningTask()) || Util.getNanos() < this.waitDeadlineNanos();
++    }
++
++    private long waitDeadlineNanos() {
++        return this.networkLoopActive ? this.nextNetworkTimeNanos : this.nextTickTimeNanos;
+     }
+ 
+     public NotificationManager notificationManager() {
+@@ -844,7 +_,9 @@
+     }
+ 
+     protected void waitUntilNextTick() {
+-        this.runAllTasks();
++        // Drain queued work without allowing a producer to postpone the network deadline.
++        while (this.haveTime() && this.pollTask()) {
++        }
+         this.waitingForNextTick = true;
+ 
+         try {
+@@ -858,7 +_,9 @@
+     protected void waitForTasks() {
+         boolean shouldLogTime = this.isTickTimeLoggingEnabled();
+         long waitStart = shouldLogTime ? Util.getNanos() : 0L;
+-        long waitNanos = this.waitingForNextTick ? this.nextTickTimeNanos - Util.getNanos() : 100000L;
++        long waitNanos = this.waitingForNextTick
++            ? Math.max(1L, this.waitDeadlineNanos() - Util.getNanos())
++            : 100000L;
+         LockSupport.parkNanos("waiting for tasks", waitNanos);
+         if (shouldLogTime) {
+             this.idleTimeNanos = this.idleTimeNanos + (Util.getNanos() - waitStart);
+@@ -872,14 +_,14 @@
+ 
+     @Override
+     protected boolean shouldRun(final TickTask task) {
+-        return task.getTick() + 3 < this.tickCount || this.haveTime();
++        // The tick stamped on a task is diagnostic. External events need to run
++        // when the server thread reaches them, including while it is behind.
++        return true;
+     }
+ 
+     @Override
+     protected boolean pollTask() {
+-        boolean mayHaveMoreTasks = this.pollTaskInternal();
+-        this.mayHaveDelayedTasks = mayHaveMoreTasks;
+-        return mayHaveMoreTasks;
++        return this.pollTaskInternal();
+     }
+ 
+     private boolean pollTaskInternal() {
+@@ -887,6 +_,10 @@
+             return true;
+         }
+ 
++        if (this.packetProcessor.processOneQueuedPacket()) {
++            return true;
++        }
++
+         if (this.tickRateManager.isSprinting() || this.shouldRunAllTasks() || this.haveTime()) {
+             for (ServerLevel level : this.getAllLevels()) {
+                 if (level.getChunkSource().pollTask()) {
+@@ -902,6 +_,7 @@
+     protected void doRunTask(final TickTask task) {
+         Profiler.get().incrementCounter("runTask");
+         super.doRunTask(task);
++        WorldTxn.mainSafePoint();
+     }
+ 
+     private Optional<ServerStatus.Favicon> loadStatusIcon() {
+@@ -946,40 +_,54 @@
+         return false;
+     }
+ 
+-    protected void tickServer(final BooleanSupplier haveTime) {
++    public void wakeSimulation() {
++        this.nextTickTimeNanos = Util.getNanos();
++        this.scheduleSimulation();
++    }
++
++    protected void tickServer() {
+         long nano = Util.getNanos();
+-        int emptyTickThreshold = this.pauseWhenEmptySeconds() * 20;
+-        if (emptyTickThreshold > 0) {
++        int emptySeconds = this.pauseWhenEmptySeconds();
++        if (emptySeconds > 0) {
+             if (this.playerList.getPlayerCount() == 0 && !this.tickRateManager.isSprinting()) {
+-                this.emptyTicks++;
++                if (this.emptySinceNanos < 0L) {
++                    this.emptySinceNanos = nano;
++                }
+             } else {
+-                this.emptyTicks = 0;
++                this.emptySinceNanos = -1L;
++                this.pausedForEmptyServer = false;
+             }
+ 
+-            if (this.emptyTicks >= emptyTickThreshold) {
+-                if (this.emptyTicks == emptyTickThreshold) {
+-                    LOGGER.info("Server empty for {} seconds, pausing", this.pauseWhenEmptySeconds());
++            if (this.emptySinceNanos >= 0L && nano - this.emptySinceNanos >= emptySeconds * TimeUtil.NANOSECONDS_PER_SECOND) {
++                if (!this.pausedForEmptyServer) {
++                    LOGGER.info("Server empty for {} seconds, pausing", emptySeconds);
+                     this.autoSave();
++                    this.pausedForEmptyServer = true;
+                 }
+ 
+-                this.tickConnection();
+                 return;
+             }
+         }
+ 
+         this.tickCount++;
+         this.tickRateManager.tick();
+-        this.tickChildren(haveTime);
++        for (ServerLevel level : this.getAllLevels()) {
++            level.advanceEnvironment();
++        }
+         if (nano - this.lastServerStatus >= STATUS_EXPIRE_TIME_NANOS) {
+             this.lastServerStatus = nano;
+             this.status = this.buildServerStatus();
+         }
+ 
+-        this.ticksUntilAutosave--;
+-        if (this.ticksUntilAutosave <= 0) {
++        if (nano - this.nextAutosaveNanos >= 0L) {
+             this.autoSave();
+         }
+ 
++        if (WORLD_STATS_INTERVAL_NANOS > 0L && nano - this.nextStatsNanos >= 0L) {
++            this.logWorldStats();
++            this.nextStatsNanos = Util.getNanos() + WORLD_STATS_INTERVAL_NANOS;
++        }
++
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("tallying");
+         long tickTime = Util.getNanos() - nano;
+@@ -992,24 +_,52 @@
+         profiler.pop();
+     }
+ 
+-    protected void processPacketsAndTick(final boolean sprinting) {
++    private void processSimulation() {
+         ProfilerFiller profiler = Profiler.get();
+-        profiler.push("tick");
++        profiler.push("simulation");
+         this.tickFrame.start();
+-        profiler.push("scheduledPacketProcessing");
+-        this.packetProcessor.processQueuedPackets();
+-        profiler.pop();
+-        this.tickServer(sprinting ? () -> false : this::haveTime);
++        this.tickServer();
++        WorldTxn.mainSafePoint();
+         this.tickFrame.end();
+         profiler.pop();
+     }
+ 
++    protected void processNetwork() {
++        ProfilerFiller profiler = Profiler.get();
++        profiler.push("network");
++        this.getPlayerList().getPlayers().forEach(player -> player.connection.suspendFlushing());
++        this.packetProcessor.processQueuedPackets();
++        WorldTxn.mainSafePoint();
++        // Saves and data swaps run here once running world events have finished.
++        WorldTxn.pollExclusive();
++        this.tickConnection();
++        WorldTxn.mainSafePoint();
++        this.playerList.tick();
++        WorldTxn.mainSafePoint();
++        this.debugSubscribers.tick();
++
++        long now = Util.getNanos();
++        if (now - this.lastTimeSyncNanos >= TimeUtil.NANOSECONDS_PER_SECOND) {
++            this.lastTimeSyncNanos = now;
++            this.forceGameTimeSynchronization();
++        }
++
++        for (ServerPlayer player : this.playerList.getPlayers()) {
++            player.connection.chunkSender.sendNextChunks(player);
++            player.connection.resumeFlushing();
++        }
++
++        profiler.pop();
++    }
++
+     private void autoSave() {
+-        this.ticksUntilAutosave = this.computeNextAutosaveInterval();
++        this.nextAutosaveNanos = Util.getNanos() + 300L * TimeUtil.NANOSECONDS_PER_SECOND;
+         LOGGER.debug("Autosave started");
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("save");
+-        this.saveEverything(true, false, false);
++        // Saving serializes entities and block entities, which world workers would otherwise
++        // be changing at the same time. It runs once running events finish (see processNetwork).
++        WorldTxn.requestExclusive(() -> this.saveEverything(true, false, false));
+         profiler.pop();
+         LOGGER.debug("Autosave finished");
+     }
+@@ -1020,26 +_,6 @@
+         }
+     }
+ 
+-    private int computeNextAutosaveInterval() {
+-        float ticksPerSecond;
+-        if (this.tickRateManager.isSprinting()) {
+-            long estimatedTickTimeNanos = this.getAverageTickTimeNanos() + 1L;
+-            ticksPerSecond = (float)TimeUtil.NANOSECONDS_PER_SECOND / (float)estimatedTickTimeNanos;
+-        } else {
+-            ticksPerSecond = this.tickRateManager.tickrate();
+-        }
+-
+-        int intendedIntervalInSeconds = 300;
+-        return Math.max(100, (int)(ticksPerSecond * 300.0F));
+-    }
+-
+-    public void onTickRateChanged() {
+-        int newAutosaveInterval = this.computeNextAutosaveInterval();
+-        if (newAutosaveInterval < this.ticksUntilAutosave) {
+-            this.ticksUntilAutosave = newAutosaveInterval;
+-        }
+-    }
+-
+     protected abstract SampleLogger getTickTimeLogger();
+ 
+     public abstract boolean isTickTimeLoggingEnabled();
+@@ -1075,71 +_,6 @@
+         return new ServerStatus.Players(maxPlayers, players.size(), sample);
+     }
+ 
+-    protected void tickChildren(final BooleanSupplier haveTime) {
+-        ProfilerFiller profiler = Profiler.get();
+-        this.getPlayerList().getPlayers().forEach(playerx -> playerx.connection.suspendFlushing());
+-        profiler.push("commandFunctions");
+-        this.getFunctions().tick();
+-        profiler.pop();
+-        if (this.tickRateManager.runsNormally()) {
+-            profiler.push("clocks");
+-            this.clockManager.tick();
+-            profiler.pop();
+-        }
+-
+-        if (this.tickCount % 20 == 0) {
+-            profiler.push("timeSync");
+-            this.forceGameTimeSynchronization();
+-            profiler.pop();
+-        }
+-
+-        profiler.push("levels");
+-        this.updateEffectiveRespawnData();
+-
+-        for (ServerLevel level : this.getAllLevels()) {
+-            profiler.push(() -> level + " " + level.dimension().identifier());
+-            profiler.push("tick");
+-
+-            try {
+-                level.tick(haveTime);
+-            } catch (Throwable t) {
+-                CrashReport report = CrashReport.forThrowable(t, "Exception ticking world");
+-                level.fillReportDetails(report);
+-                throw new ReportedException(report);
+-            }
+-
+-            profiler.pop();
+-            profiler.pop();
+-        }
+-
+-        profiler.popPush("connection");
+-        this.tickConnection();
+-        profiler.popPush("players");
+-        this.playerList.tick();
+-        profiler.popPush("debugSubscribers");
+-        this.debugSubscribers.tick();
+-        if (this.tickRateManager.runsNormally()) {
+-            profiler.popPush("gameTests");
+-            GameTestTicker.SINGLETON.tick();
+-        }
+-
+-        profiler.popPush("server gui refresh");
+-
+-        for (Runnable tickable : this.tickables) {
+-            tickable.run();
+-        }
+-
+-        profiler.popPush("send chunks");
+-
+-        for (ServerPlayer player : this.playerList.getPlayers()) {
+-            player.connection.chunkSender.sendNextChunks(player);
+-            player.connection.resumeFlushing();
+-        }
+-
+-        profiler.pop();
+-        this.serverActivityMonitor.tick();
+-    }
+-
+     private void updateEffectiveRespawnData() {
+         LevelData.RespawnData respawnData = this.worldData.overworldData().getRespawnData();
+         ServerLevel respawnLevel = this.findRespawnDimension();
+@@ -1535,24 +_,42 @@
+                         .thenApply(managers -> new MinecraftServer.ReloadableResources(resources, managers));
+                 }
+             )
+-            .thenAcceptAsync(newResources -> {
+-                this.resources.close();
+-                this.resources = newResources;
+-                this.packRepository.setSelected(packsToEnable);
+-                WorldDataConfiguration newConfig = new WorldDataConfiguration(getSelectedPacks(this.packRepository, true), this.worldData.enabledFeatures());
+-                this.worldData.setDataConfiguration(newConfig);
+-                this.resources.managers.updateComponentsAndStaticRegistryTags();
+-                this.resources.managers.getRecipeManager().finalizeRecipeLoading(this.worldData.enabledFeatures());
+-                this.getPlayerList().saveAll();
+-                this.getPlayerList().reloadResources();
+-                this.functionManager.replaceLibrary(this.resources.managers.getFunctionLibrary());
+-                this.structureTemplateManager.onResourceManagerReload(this.resources.resourceManager);
++            .thenComposeAsync(newResources -> {
++                CompletableFuture<Void> swapped = new CompletableFuture<>();
++                WorldTxn.requestExclusive(() -> {
++                    try {
++                        this.swapResources(newResources, packsToEnable);
++                        swapped.complete(null);
++                    } catch (Throwable t) {
++                        swapped.completeExceptionally(t);
++                    }
++                });
++                return swapped;
+             }, this);
+         if (this.isSameThread()) {
+-            this.managedBlock(result::isDone);
++            // The data swap is exclusive work; it can only run from here while this waits.
++            this.managedBlock(() -> {
++                WorldTxn.pollExclusive();
++                return result.isDone();
++            });
+         }
+ 
+         return result;
++    }
++
++    private void swapResources(final MinecraftServer.ReloadableResources newResources, final Collection<String> packsToEnable) {
++        // Workers read recipes, loot tables, tags and functions; swap them while paused.
++        this.resources.close();
++        this.resources = newResources;
++        this.packRepository.setSelected(packsToEnable);
++        WorldDataConfiguration newConfig = new WorldDataConfiguration(getSelectedPacks(this.packRepository, true), this.worldData.enabledFeatures());
++        this.worldData.setDataConfiguration(newConfig);
++        this.resources.managers.updateComponentsAndStaticRegistryTags();
++        this.resources.managers.getRecipeManager().finalizeRecipeLoading(this.worldData.enabledFeatures());
++        this.getPlayerList().saveAll();
++        this.getPlayerList().reloadResources();
++        this.functionManager.replaceLibrary(this.resources.managers.getFunctionLibrary());
++        this.structureTemplateManager.onResourceManagerReload(this.resources.resourceManager);
+     }
+ 
+     public static WorldDataConfiguration configurePackRepository(

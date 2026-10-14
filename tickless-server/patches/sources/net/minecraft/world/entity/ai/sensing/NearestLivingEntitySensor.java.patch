@@ -1,0 +1,21 @@
+--- a/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
+@@ -1,5 +_,6 @@
+ package net.minecraft.world.entity.ai.sensing;
+ 
++import net.minecraft.world.level.parallel.SnapshotSort;
+ import com.google.common.collect.ImmutableSet;
+ import java.util.Comparator;
+ import java.util.List;
+@@ -18,7 +_,10 @@
+         double followRange = body.getAttributeValue(Attributes.FOLLOW_RANGE);
+         AABB boundingBox = body.getBoundingBox().inflate(followRange, followRange, followRange);
+         List<LivingEntity> livingEntities = level.getEntitiesOfClass(LivingEntity.class, boundingBox, mob -> mob != body && mob.isAlive());
+-        livingEntities.sort(Comparator.comparingDouble(body::distanceToSqr));
++        SnapshotSort.sortByKey(livingEntities, body::distanceToSqr);
++        // Both memories share the same immutable snapshot; the type index needs stable
++        // membership and must not retain a second array of every neighbour.
++        livingEntities = List.copyOf(livingEntities);
+         Brain<?> brain = body.getBrain();
+         brain.setMemory(MemoryModuleType.NEAREST_LIVING_ENTITIES, livingEntities);
+         brain.setMemory(MemoryModuleType.NEAREST_VISIBLE_LIVING_ENTITIES, new NearestVisibleLivingEntities(level, body, livingEntities));

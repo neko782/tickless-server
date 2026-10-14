@@ -1,0 +1,30 @@
+--- a/net/minecraft/world/entity/InsideBlockEffectApplier.java
++++ b/net/minecraft/world/entity/InsideBlockEffectApplier.java
+@@ -66,16 +_,23 @@
+ 
+         private void flushStep() {
+             for (InsideBlockEffectType type : APPLY_ORDER) {
++                // Every entity flushes every movement step and the lists are almost always empty;
++                // addAll would still copy each one into a fresh array.
+                 List<Consumer<Entity>> beforeEffects = this.beforeEffectsInStep.get(type);
+-                this.finalEffects.addAll(beforeEffects);
+-                beforeEffects.clear();
++                if (!beforeEffects.isEmpty()) {
++                    this.finalEffects.addAll(beforeEffects);
++                    beforeEffects.clear();
++                }
++
+                 if (this.effectsInStep.remove(type)) {
+                     this.finalEffects.add(type.effect());
+                 }
+ 
+                 List<Consumer<Entity>> afterEffects = this.afterEffectsInStep.get(type);
+-                this.finalEffects.addAll(afterEffects);
+-                afterEffects.clear();
++                if (!afterEffects.isEmpty()) {
++                    this.finalEffects.addAll(afterEffects);
++                    afterEffects.clear();
++                }
+             }
+         }
+ 

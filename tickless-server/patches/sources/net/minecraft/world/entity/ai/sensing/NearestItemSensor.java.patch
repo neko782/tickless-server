@@ -1,0 +1,18 @@
+--- a/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java
+@@ -1,5 +_,6 @@
+ package net.minecraft.world.entity.ai.sensing;
+ 
++import net.minecraft.world.level.parallel.SnapshotSort;
+ import com.google.common.collect.ImmutableSet;
+ import java.util.Comparator;
+ import java.util.List;
+@@ -25,7 +_,7 @@
+     protected void doTick(final ServerLevel level, final Mob body) {
+         Brain<?> brain = body.getBrain();
+         List<ItemEntity> items = level.getEntitiesOfClass(ItemEntity.class, body.getBoundingBox().inflate(32.0, 16.0, 32.0), item -> true);
+-        items.sort(Comparator.comparingDouble(body::distanceToSqr));
++        SnapshotSort.sortByKey(items, body::distanceToSqr);
+         Optional<ItemEntity> nearestVisibleLovedItem = items.stream()
+             .filter(itemEntity -> body.wantsToPickUp(level, itemEntity.getItem()))
+             .filter(itemEntity -> itemEntity.closerThan(body, 32.0))

@@ -1,0 +1,14 @@
+--- a/net/minecraft/world/TickRateManager.java
++++ b/net/minecraft/world/TickRateManager.java
+@@ -7,9 +_,9 @@
+ public class TickRateManager {
+     public static final float MIN_TICKRATE = 1.0F;
+     protected float tickrate = 20.0F;
+-    protected long nanosecondsPerTick = TimeUtil.NANOSECONDS_PER_SECOND / 20L;
++    protected volatile long nanosecondsPerTick = TimeUtil.NANOSECONDS_PER_SECOND / 20L;
+     protected int frozenTicksToRun = 0;
+-    protected boolean runGameElements = true;
++    protected volatile boolean runGameElements = true;
+     protected boolean isFrozen = false;
+ 
+     public void setTickRate(final float rate) {

@@ -1,0 +1,40 @@
+--- a/net/minecraft/world/entity/ai/sensing/TemptingSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/TemptingSensor.java
+@@ -1,12 +_,10 @@
+ package net.minecraft.world.entity.ai.sensing;
+ 
++import net.minecraft.world.level.parallel.SnapshotSort;
+ import com.google.common.collect.ImmutableSet;
+-import java.util.Comparator;
+-import java.util.List;
+ import java.util.Set;
+ import java.util.function.BiPredicate;
+ import java.util.function.Predicate;
+-import java.util.stream.Collectors;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.world.entity.EntitySelector;
+ import net.minecraft.world.entity.PathfinderMob;
+@@ -38,16 +_,13 @@
+     protected void doTick(final ServerLevel level, final PathfinderMob body) {
+         Brain<?> brain = body.getBrain();
+         TargetingConditions targeting = TEMPT_TARGETING.copy().range((float)body.getAttributeValue(Attributes.TEMPT_RANGE));
+-        List<Player> players = level.players()
+-            .stream()
+-            .filter(EntitySelector.NO_SPECTATORS)
+-            .filter(playerx -> targeting.test(level, body, playerx))
+-            .filter(p -> this.playerHoldingTemptation(body, p))
+-            .filter(playerx -> !body.hasPassenger(playerx))
+-            .sorted(Comparator.comparingDouble(body::distanceToSqr))
+-            .collect(Collectors.toList());
+-        if (!players.isEmpty()) {
+-            Player player = players.get(0);
++        Player player = SnapshotSort.firstByKey(level.players(),
++            candidate -> EntitySelector.NO_SPECTATORS.test(candidate)
++                && targeting.test(level, body, candidate)
++                && this.playerHoldingTemptation(body, candidate)
++                && !body.hasPassenger(candidate),
++            body::distanceToSqr);
++        if (player != null) {
+             brain.setMemory(MemoryModuleType.TEMPTING_PLAYER, player);
+         } else {
+             brain.eraseMemory(MemoryModuleType.TEMPTING_PLAYER);

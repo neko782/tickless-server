@@ -1,0 +1,184 @@
+--- a/net/minecraft/world/entity/ai/navigation/PathNavigation.java
++++ b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+@@ -36,7 +_,7 @@
+     private static final float STUCK_THRESHOLD_DISTANCE_FACTOR = 0.25F;
+     protected final Mob mob;
+     protected final Level level;
+-    protected @Nullable Path path;
++    protected volatile @Nullable Path path;
+     protected double speedModifier;
+     protected int tick;
+     protected int lastStuckCheck;
+@@ -98,14 +_,24 @@
+         this.speedModifier = speedModifier;
+     }
+ 
++    /** Asks this navigation to replan on its next update. Safe to call from any world worker. */
++    public void markPathStale() {
++        this.hasDelayedRecomputation = true;
++    }
++
+     public void recomputePath() {
+-        if (this.level.getGameTime() - this.timeLastRecompute <= 20L || !this.canUpdatePath()) {
+-            this.hasDelayedRecomputation = true;
+-        } else if (this.targetPos != null) {
+-            this.path = null;
+-            this.path = this.createPath(this.targetPos, this.reachRange);
+-            this.timeLastRecompute = this.level.getGameTime();
+-            this.hasDelayedRecomputation = false;
++        try {
++            if (this.level.getGameTime() - this.timeLastRecompute <= 20L || !this.canUpdatePath()) {
++                this.hasDelayedRecomputation = true;
++            } else if (this.targetPos != null) {
++                this.path = null;
++                this.path = this.createPath(this.targetPos, this.reachRange);
++                this.timeLastRecompute = this.level.getGameTime();
++                this.hasDelayedRecomputation = false;
++            }
++
++        } finally {
++            this.refreshPathRegistration();
+         }
+     }
+ 
+@@ -190,29 +_,34 @@
+     }
+ 
+     public boolean moveTo(final @Nullable Path newPath, final double speedModifier) {
+-        if (newPath == null) {
+-            this.path = null;
+-            return false;
+-        }
+-
+-        if (!newPath.sameAs(this.path)) {
+-            this.path = newPath;
+-        }
+-
+-        if (this.isDone()) {
+-            return false;
+-        }
+-
+-        this.trimPath();
+-        if (this.path.getNodeCount() <= 0) {
+-            return false;
+-        }
+-
+-        this.speedModifier = speedModifier;
+-        Vec3 mobPos = this.getTempMobPos();
+-        this.lastStuckCheck = this.tick;
+-        this.lastStuckCheckPos = mobPos;
+-        return true;
++        try {
++            if (newPath == null) {
++                this.path = null;
++                return false;
++            }
++
++            if (!newPath.sameAs(this.path)) {
++                this.path = newPath;
++            }
++
++            if (this.isDone()) {
++                return false;
++            }
++
++            this.trimPath();
++            if (this.path.getNodeCount() <= 0) {
++                return false;
++            }
++
++            this.speedModifier = speedModifier;
++            Vec3 mobPos = this.getTempMobPos();
++            this.lastStuckCheck = this.tick;
++            this.lastStuckCheckPos = mobPos;
++            return true;
++
++        } finally {
++            this.refreshPathRegistration();
++        }
+     }
+ 
+     public @Nullable Path getPath() {
+@@ -220,26 +_,31 @@
+     }
+ 
+     public void tick() {
+-        this.tick++;
+-        if (this.hasDelayedRecomputation) {
+-            this.recomputePath();
+-        }
+-
+-        if (!this.isDone()) {
+-            if (this.canUpdatePath()) {
+-                this.followThePath();
+-            } else if (this.path != null && !this.path.isDone()) {
+-                Vec3 mobPos = this.getTempMobPos();
+-                Vec3 pos = this.path.getNextEntityPos(this.mob);
+-                if (mobPos.y > pos.y && !this.mob.onGround() && Mth.floor(mobPos.x) == Mth.floor(pos.x) && Mth.floor(mobPos.z) == Mth.floor(pos.z)) {
+-                    this.path.advance();
+-                }
++        try {
++            this.tick++;
++            if (this.hasDelayedRecomputation) {
++                this.recomputePath();
+             }
+ 
+             if (!this.isDone()) {
+-                Vec3 target = this.path.getNextEntityPos(this.mob);
+-                this.mob.getMoveControl().setWantedPosition(target.x, this.getGroundY(target), target.z, this.speedModifier);
++                if (this.canUpdatePath()) {
++                    this.followThePath();
++                } else if (this.path != null && !this.path.isDone()) {
++                    Vec3 mobPos = this.getTempMobPos();
++                    Vec3 pos = this.path.getNextEntityPos(this.mob);
++                    if (mobPos.y > pos.y && !this.mob.onGround() && Mth.floor(mobPos.x) == Mth.floor(pos.x) && Mth.floor(mobPos.z) == Mth.floor(pos.z)) {
++                        this.path.advance();
++                    }
++                }
++
++                if (!this.isDone()) {
++                    Vec3 target = this.path.getNextEntityPos(this.mob);
++                    this.mob.getMoveControl().setWantedPosition(target.x, this.getGroundY(target), target.z, this.speedModifier);
++                }
+             }
++
++        } finally {
++            this.refreshPathRegistration();
+         }
+     }
+ 
+@@ -351,6 +_,15 @@
+ 
+     public void stop() {
+         this.path = null;
++        this.refreshPathRegistration();
++    }
++
++    /** Repeated after each owner update so a raced observation is corrected next step. */
++    public void refreshPathRegistration() {
++        if (this.level instanceof ServerLevel serverLevel) {
++            Path observed = this.path;
++            serverLevel.updateActiveNavigation(this.mob, this, observed != null && !observed.isDone());
++        }
+     }
+ 
+     protected abstract Vec3 getTempMobPos();
+@@ -407,12 +_,15 @@
+     }
+ 
+     public boolean shouldRecomputePath(final BlockPos pos) {
++        // Called for every navigating mob when a block changes, possibly while that mob updates
++        // on another worker, so read the path once.
++        Path path = this.path;
+         if (this.hasDelayedRecomputation) {
+             return false;
+-        } else if (this.path != null && !this.path.isDone() && this.path.getNodeCount() != 0) {
+-            Node target = this.path.getEndNode();
++        } else if (path != null && !path.isDone() && path.getNodeCount() != 0) {
++            Node target = path.getEndNode();
+             Vec3 middlePos = new Vec3((target.x + this.mob.getX()) / 2.0, (target.y + this.mob.getY()) / 2.0, (target.z + this.mob.getZ()) / 2.0);
+-            return pos.closerToCenterThan(middlePos, this.path.getNodeCount() - this.path.getNextNodeIndex());
++            return pos.closerToCenterThan(middlePos, path.getNodeCount() - path.getNextNodeIndex());
+         } else {
+             return false;
+         }

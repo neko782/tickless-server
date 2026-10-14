@@ -1,0 +1,167 @@
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -243,7 +_,9 @@
+     public ServerPlayer player;
+     public final PlayerChunkSender chunkSender;
+     private int tickCount;
+-    private int ackBlockChangesUpTo = -1;
++    // Written by the player's lane, read and cleared by the connection tick on the server thread.
++    private final java.util.concurrent.atomic.AtomicInteger ackBlockChangesUpTo = new java.util.concurrent.atomic.AtomicInteger(-1);
++    private final PlayerLane lane;
+     private final TickThrottler dropSpamThrottler = new TickThrottler(20, 1480);
+     private final TickThrottler chatSpamThrottler;
+     private final TickThrottler commandSpamThrottler;
+@@ -296,27 +_,64 @@
+         this.signedMessageDecoder = SignedMessageChain.Decoder.unsigned(player.getUUID(), server::enforceSecureProfile);
+         this.chatMessageChain = new FutureChain(server);
+         this.commandSuggestionsProvider = new ServerCommandSuggestionsProvider(player);
++        this.lane = new PlayerLane(server);
++    }
++
++    public PlayerLane lane() {
++        return this.lane;
++    }
++
++    /**
++     * Packets that change global state (respawning, cross-dimension teleports, game rules, command
++     * and structure blocks, view distance, chunk batching). Their player's lane hands them to the
++     * server thread; every other world packet runs on a world worker.
++     */
++    public static boolean runsOnServerThread(final Packet<?> packet) {
++        return packet instanceof ServerboundClientCommandPacket
++            || packet instanceof ServerboundTeleportToEntityPacket
++            || packet instanceof ServerboundSpectatorActionPacket
++            || packet instanceof ServerboundSetCommandBlockPacket
++            || packet instanceof ServerboundSetCommandMinecartPacket
++            || packet instanceof ServerboundSetStructureBlockPacket
++            || packet instanceof ServerboundSetTestBlockPacket
++            || packet instanceof ServerboundTestInstanceBlockActionPacket
++            || packet instanceof ServerboundSetJigsawBlockPacket
++            || packet instanceof ServerboundJigsawGeneratePacket
++            || packet instanceof ServerboundSetGameRulePacket
++            || packet instanceof ServerboundChangeDifficultyPacket
++            || packet instanceof ServerboundLockDifficultyPacket
++            || packet instanceof ServerboundChangeGameModePacket
++            || packet instanceof ServerboundChatSessionUpdatePacket
++            || packet instanceof ServerboundClientInformationPacket
++            || packet instanceof ServerboundChunkBatchReceivedPacket
++            || packet instanceof ServerboundDebugSubscriptionRequestPacket
++            || packet instanceof ServerboundSeenAdvancementsPacket;
+     }
+ 
+     @Override
+     public void tick() {
+-        if (this.ackBlockChangesUpTo > -1) {
+-            this.send(new ClientboundBlockChangedAckPacket(this.ackBlockChangesUpTo));
+-            this.ackBlockChangesUpTo = -1;
+-        }
+-
+-        if (this.server.isPaused() || !this.tickPlayer()) {
+-            this.keepConnectionAlive();
+-            this.chatSpamThrottler.tick();
+-            this.commandSpamThrottler.tick();
+-            this.dropSpamThrottler.tick();
+-            this.commandSuggestionsProvider.tick();
+-            if (this.player.getLastActionTime() > 0L
+-                && this.server.playerIdleTimeout() > 0
+-                && Util.getMillis() - this.player.getLastActionTime() > TimeUnit.MINUTES.toMillis(this.server.playerIdleTimeout())
+-                && !this.player.wonGame) {
+-                this.disconnect(Component.translatable("multiplayer.disconnect.idling"));
+-            }
++        int ackUpTo = this.ackBlockChangesUpTo.getAndSet(-1);
++        if (ackUpTo > -1) {
++            this.send(new ClientboundBlockChangedAckPacket(ackUpTo));
++        }
++
++        this.keepConnectionAlive();
++        this.chatSpamThrottler.tick();
++        this.commandSpamThrottler.tick();
++        this.dropSpamThrottler.tick();
++        this.commandSuggestionsProvider.tick();
++        if (this.player.getLastActionTime() > 0L
++            && this.server.playerIdleTimeout() > 0
++            && Util.getMillis() - this.player.getLastActionTime() > TimeUnit.MINUTES.toMillis(this.server.playerIdleTimeout())
++            && !this.player.wonGame) {
++            this.disconnect(Component.translatable("multiplayer.disconnect.idling"));
++        }
++    }
++
++    /** Player movement and game state run on the player's simulation timer. */
++    public void tickPlayerTimer() {
++        if (!this.server.isPaused() && this.connection.isConnected()) {
++            this.tickPlayer();
+         }
+     }
+ 
+@@ -1531,7 +_,8 @@
+     @Override
+     public void onDisconnect(final DisconnectionDetails details) {
+         LOGGER.info("{} lost connection: {}", this.player.getPlainTextName(), details.reason().getString());
+-        this.removePlayerFromWorld();
++        // Not while the lane is in the middle of one of the player's packets or steps.
++        this.lane.close(this::removePlayerFromWorld);
+         super.onDisconnect(details);
+     }
+ 
+@@ -1551,7 +_,7 @@
+             throw new IllegalArgumentException("Expected packet sequence nr >= 0");
+         }
+ 
+-        this.ackBlockChangesUpTo = Math.max(packetSequenceNr, this.ackBlockChangesUpTo);
++        this.ackBlockChangesUpTo.accumulateAndGet(packetSequenceNr, Math::max);
+     }
+ 
+     @Override
+@@ -1707,8 +_,35 @@
+             this.send(new ClientboundSystemChatPacket(Component.translatable("chat.disabled.options").withStyle(ChatFormatting.RED), false));
+         } else {
+             this.player.resetLastActionTime();
+-            this.server.execute(chatHandler);
+-        }
++            if (this.lane.isActive()) {
++                // In order with the player's other packets. Commands run as world events like
++                // command blocks, so a heavy command or function never holds up the server thread;
++                // chat and commands that change server-wide state run on the server thread.
++                this.lane.submitChat(chatHandler, !isCommand || runsCommandOnServerThread(message));
++            } else {
++                this.server.execute(chatHandler);
++            }
++        }
++    }
++
++    // Commands that change server-wide state that is only safe to change from the server thread:
++    // data packs, the tick rate, clock and weather, tickets, the player list and its files, profilers.
++    private static final java.util.Set<String> SERVER_THREAD_COMMANDS = java.util.Set.of(
++        "reload", "datapack", "stop", "save-all", "save-on", "save-off", "tick", "time", "weather", "forceload",
++        "worldborder", "gamerule", "difficulty", "setworldspawn", "defaultgamemode", "debug", "perf", "jfr",
++        "op", "deop", "whitelist", "ban", "ban-ip", "banlist", "pardon", "pardon-ip", "kick", "schedule",
++        "publish", "setidletimeout", "transfer"
++    );
++
++    public static boolean runsCommandOnServerThread(final String command) {
++        int end = command.indexOf(' ');
++        String root = end < 0 ? command : command.substring(0, end);
++        if (root.startsWith("/")) {
++            root = root.substring(1);
++        }
++
++        int namespace = root.indexOf(':');
++        return SERVER_THREAD_COMMANDS.contains(namespace < 0 ? root : root.substring(namespace + 1));
+     }
+ 
+     private Optional<LastSeenMessages> unpackAndApplyLastSeen(final LastSeenMessages.Update update) {
+@@ -1870,9 +_,11 @@
+ 
+     public void switchToConfig() {
+         this.waitingForSwitchToConfig = true;
+-        this.removePlayerFromWorld();
+-        this.send(ClientboundStartConfigurationPacket.INSTANCE);
+-        this.connection.setupOutboundProtocol(ConfigurationProtocols.CLIENTBOUND);
++        this.lane.close(() -> {
++            this.removePlayerFromWorld();
++            this.send(ClientboundStartConfigurationPacket.INSTANCE);
++            this.connection.setupOutboundProtocol(ConfigurationProtocols.CLIENTBOUND);
++        });
+     }
+ 
+     @Override

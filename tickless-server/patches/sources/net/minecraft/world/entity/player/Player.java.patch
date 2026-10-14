@@ -1,0 +1,10 @@
+--- a/net/minecraft/world/entity/player/Player.java
++++ b/net/minecraft/world/entity/player/Player.java
+@@ -811,6 +_,7 @@
+     }
+ 
+     public InteractionResult interactOn(final Entity entity, final InteractionHand hand, final Vec3 location) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(entity);
+         if (this.isSpectator()) {
+             if (entity instanceof MenuProvider menuProvider) {
+                 this.openMenu(menuProvider);

@@ -1,0 +1,121 @@
+--- a/net/minecraft/server/level/ThreadedLevelLightEngine.java
++++ b/net/minecraft/server/level/ThreadedLevelLightEngine.java
+@@ -2,6 +_,8 @@
+ 
+ import com.mojang.datafixers.util.Pair;
+ import com.mojang.logging.LogUtils;
++import it.unimi.dsi.fastutil.HashCommon;
++import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+ import it.unimi.dsi.fastutil.objects.ObjectList;
+ import it.unimi.dsi.fastutil.objects.ObjectListIterator;
+@@ -32,6 +_,11 @@
+     private final ChunkTaskDispatcher taskDispatcher;
+     private final int taskPerBatch = 1000;
+     private final AtomicBoolean scheduled = new AtomicBoolean();
++    private static final int CHECK_STRIPES = 64;
++    private final LongOpenHashSet[] pendingChecks = new LongOpenHashSet[CHECK_STRIPES];
++    private final AtomicBoolean checksPendingFlag = new AtomicBoolean();
++    // A plain read of the flag first keeps writers off the atomic's cache line while it is set.
++    private volatile boolean checksPending;
+ 
+     public ThreadedLevelLightEngine(
+         final LightChunkGetter lightChunkGetter,
+@@ -44,6 +_,9 @@
+         this.chunkMap = chunkMap;
+         this.taskDispatcher = taskDispatcher;
+         this.consecutiveExecutor = consecutiveExecutor;
++        for (int i = 0; i < CHECK_STRIPES; i++) {
++            this.pendingChecks[i] = new LongOpenHashSet();
++        }
+     }
+ 
+     @Override
+@@ -55,15 +_,51 @@
+         throw (UnsupportedOperationException)Util.pauseInIde(new UnsupportedOperationException("Ran automatically on a different thread!"));
+     }
+ 
++    /**
++     * Queues a light check for a changed block. World workers change blocks tens of thousands of
++     * times per second; sending each change through the chunk task dispatcher as its own task
++     * woke a pool thread per change. Changes are collected here instead, in lock stripes because
++     * callers hold block locks, repeated changes to the same block collapse into one check, and
++     * the next light update takes them all.
++     */
+     @Override
+     public void checkBlock(final BlockPos pos) {
+-        BlockPos immutable = pos.immutable();
+-        this.addTask(
+-            SectionPos.blockToSectionCoord(pos.getX()),
+-            SectionPos.blockToSectionCoord(pos.getZ()),
+-            ThreadedLevelLightEngine.TaskType.PRE_UPDATE,
+-            Util.name(() -> super.checkBlock(immutable), () -> "checkBlock " + immutable)
+-        );
++        long key = pos.asLong();
++        LongOpenHashSet stripe = this.pendingChecks[(int)(HashCommon.mix(key) & (CHECK_STRIPES - 1))];
++        synchronized (stripe) {
++            stripe.add(key);
++        }
++
++        if (!this.checksPending && !this.checksPendingFlag.getAndSet(true)) {
++            this.checksPending = true;
++            this.tryScheduleUpdate();
++        }
++    }
++
++    private void runPendingChecks() {
++        if (!this.checksPending) {
++            return;
++        }
++
++        // Clear the flag first: a check added from now on sets it again and schedules an update.
++        this.checksPending = false;
++        this.checksPendingFlag.set(false);
++        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
++        for (LongOpenHashSet stripe : this.pendingChecks) {
++            long[] checks;
++            synchronized (stripe) {
++                if (stripe.isEmpty()) {
++                    continue;
++                }
++
++                checks = stripe.toLongArray();
++                stripe.clear();
++            }
++
++            for (long check : checks) {
++                super.checkBlock(pos.set(check));
++            }
++        }
+     }
+ 
+     protected void updateChunkStatus(final ChunkPos pos) {
+@@ -180,15 +_,25 @@
+     }
+ 
+     public void tryScheduleUpdate() {
+-        if ((!this.lightTasks.isEmpty() || super.hasLightWork()) && this.scheduled.compareAndSet(false, true)) {
++        if ((!this.lightTasks.isEmpty() || super.hasLightWork() || this.hasPendingChecks()) && this.scheduled.compareAndSet(false, true)) {
+             this.consecutiveExecutor.schedule(() -> {
+-                this.runUpdate();
+-                this.scheduled.set(false);
++                // A failed update must not leave the flag set: no update would ever be scheduled
++                // again, and shutdown waits for light work forever.
++                try {
++                    this.runUpdate();
++                } finally {
++                    this.scheduled.set(false);
++                }
+             });
+         }
+     }
+ 
++    private boolean hasPendingChecks() {
++        return this.checksPending;
++    }
++
+     private void runUpdate() {
++        this.runPendingChecks();
+         int totalSize = Math.min(this.lightTasks.size(), 1000);
+         ObjectListIterator<Pair<ThreadedLevelLightEngine.TaskType, Runnable>> iterator = this.lightTasks.iterator();
+ 

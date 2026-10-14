@@ -1,0 +1,25 @@
+--- a/net/minecraft/world/entity/animal/golem/CopperGolem.java
++++ b/net/minecraft/world/entity/animal/golem/CopperGolem.java
+@@ -415,15 +_,18 @@
+ 
+     @Override
+     public boolean hasContainerOpen(final ContainerOpenersCounter container, final BlockPos blockPos) {
+-        if (this.openedChestPos == null) {
++        // The golem may close its chest while the block-state lookup waits on world work.
++        // Observe one immutable position throughout this chest-animation query.
++        BlockPos opened = this.openedChestPos;
++        if (opened == null) {
+             return false;
+         }
+ 
+-        BlockState blockState = this.level().getBlockState(this.openedChestPos);
+-        return this.openedChestPos.equals(blockPos)
++        BlockState blockState = this.level().getBlockState(opened);
++        return opened.equals(blockPos)
+             || blockState.getBlock() instanceof ChestBlock
+                 && blockState.getValue(ChestBlock.TYPE) != ChestType.SINGLE
+-                && ChestBlock.getConnectedBlockPos(this.openedChestPos, blockState).equals(blockPos);
++                && ChestBlock.getConnectedBlockPos(opened, blockState).equals(blockPos);
+     }
+ 
+     @Override

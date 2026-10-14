@@ -1,0 +1,20 @@
+--- a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
++++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
+@@ -47,8 +_,15 @@
+             .stream()
+             .filter(entryx -> ((Heightmap.Types)entryx.getKey()).sendToClient())
+             .collect(Collectors.toMap(Entry::getKey, entryx -> (long[])((Heightmap)entryx.getValue()).getRawData().clone()));
+-        this.buffer = new byte[calculateChunkSize(levelChunk)];
+-        extractChunkData(new FriendlyByteBuf(this.getWriteBuffer()), levelChunk);
++        // World workers can change a section between sizing and writing it, so write into a
++        // growable buffer and copy out the bytes that were actually written.
++        ByteBuf sectionData = Unpooled.buffer(calculateChunkSize(levelChunk));
++        for (LevelChunkSection section : levelChunk.getSections()) {
++            section.write(new FriendlyByteBuf(sectionData));
++        }
++
++        this.buffer = new byte[sectionData.readableBytes()];
++        sectionData.readBytes(this.buffer);
+         this.blockEntitiesData = Lists.newArrayList();
+ 
+         for (Entry<BlockPos, BlockEntity> entry : levelChunk.getBlockEntities().entrySet()) {

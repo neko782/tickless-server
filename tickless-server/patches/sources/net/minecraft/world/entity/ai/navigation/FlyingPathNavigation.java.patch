@@ -1,0 +1,48 @@
+--- a/net/minecraft/world/entity/ai/navigation/FlyingPathNavigation.java
++++ b/net/minecraft/world/entity/ai/navigation/FlyingPathNavigation.java
+@@ -43,25 +_,30 @@
+ 
+     @Override
+     public void tick() {
+-        this.tick++;
+-        if (this.hasDelayedRecomputation) {
+-            this.recomputePath();
+-        }
+-
+-        if (!this.isDone()) {
+-            if (this.canUpdatePath()) {
+-                this.followThePath();
+-            } else if (this.path != null && !this.path.isDone()) {
+-                Vec3 pos = this.path.getNextEntityPos(this.mob);
+-                if (this.mob.getBlockX() == Mth.floor(pos.x) && this.mob.getBlockY() == Mth.floor(pos.y) && this.mob.getBlockZ() == Mth.floor(pos.z)) {
+-                    this.path.advance();
+-                }
++        try {
++            this.tick++;
++            if (this.hasDelayedRecomputation) {
++                this.recomputePath();
+             }
+ 
+             if (!this.isDone()) {
+-                Vec3 target = this.path.getNextEntityPos(this.mob);
+-                this.mob.getMoveControl().setWantedPosition(target.x, target.y, target.z, this.speedModifier);
++                if (this.canUpdatePath()) {
++                    this.followThePath();
++                } else if (this.path != null && !this.path.isDone()) {
++                    Vec3 pos = this.path.getNextEntityPos(this.mob);
++                    if (this.mob.getBlockX() == Mth.floor(pos.x) && this.mob.getBlockY() == Mth.floor(pos.y) && this.mob.getBlockZ() == Mth.floor(pos.z)) {
++                        this.path.advance();
++                    }
++                }
++
++                if (!this.isDone()) {
++                    Vec3 target = this.path.getNextEntityPos(this.mob);
++                    this.mob.getMoveControl().setWantedPosition(target.x, target.y, target.z, this.speedModifier);
++                }
+             }
++
++        } finally {
++            this.refreshPathRegistration();
+         }
+     }
+ 

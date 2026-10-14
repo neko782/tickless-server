@@ -1,0 +1,11 @@
+--- a/net/minecraft/world/level/lighting/ChunkSkyLightSources.java
++++ b/net/minecraft/world/level/lighting/ChunkSkyLightSources.java
+@@ -74,7 +_,7 @@
+         return this.minY;
+     }
+ 
+-    public boolean update(final BlockGetter level, final int x, final int y, final int z) {
++    public synchronized boolean update(final BlockGetter level, final int x, final int y, final int z) {
+         int upperEdgeY = y + 1;
+         int index = index(x, z);
+         int currentLowestSourceY = this.get(index);
