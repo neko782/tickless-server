@@ -50,10 +50,11 @@ import java.util.zip.ZipOutputStream;
  * around each {@code monitorenter}/{@code monitorexit}, and synchronized methods become explicit
  * monitor blocks with the same hooks.
  *
- * <p>usage: OwnershipTransform &lt;jar&gt; [classpath jars...]. The jar is rewritten in place,
+ * <p>usage: OwnershipTransform [--races] &lt;jar&gt; [classpath jars...]. The jar is rewritten in place,
  * and {@code tickless-ownership-sites.txt} is added, naming each rewritten write by its index;
  * a field write's line also gives the field (tab separated owner, name and descriptor), which a
- * rollback uses to restore it.
+ * rollback uses to restore it. {@code --races} also adds the race check hooks (see
+ * {@link RaceTransform}), for a diagnostic build only.
  */
 public final class OwnershipTransform {
     private ClassLoader resourceLoader;
@@ -114,14 +115,21 @@ public final class OwnershipTransform {
     private String current;
 
     public static void main(final String[] args) throws IOException {
-        Path jar = Path.of(args[0]);
+        int first = 0;
+        boolean races = false;
+        if (args.length > 0 && args[0].equals("--races")) {
+            races = true;
+            first = 1;
+        }
+
+        Path jar = Path.of(args[first]);
         List<URL> classpath = new ArrayList<>();
         classpath.add(jar.toUri().toURL());
-        for (int i = 1; i < args.length; i++) {
+        for (int i = first + 1; i < args.length; i++) {
             classpath.add(Path.of(args[i]).toUri().toURL());
         }
 
-        new OwnershipTransform().run(jar, classpath);
+        new OwnershipTransform().run(jar, classpath, races);
     }
 
     /** Transform final, post-Mixin class bytes without loading game classes. */
@@ -191,7 +199,7 @@ public final class OwnershipTransform {
         return found;
     }
 
-    private void run(final Path jar, final List<URL> classpath) throws IOException {
+    private void run(final Path jar, final List<URL> classpath, final boolean races) throws IOException {
         Map<String, byte[]> entries = new LinkedHashMap<>();
         try (ZipFile zip = new ZipFile(jar.toFile())) {
             Enumeration<? extends ZipEntry> e = zip.entries();
@@ -253,6 +261,23 @@ public final class OwnershipTransform {
         }
 
         entries.put("tickless-ownership-sites.txt", (String.join("\n", this.sites) + "\n").getBytes(StandardCharsets.UTF_8));
+        if (races) {
+            List<String> raceSites = new ArrayList<>();
+            int raceClasses = 0;
+            for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+                if (entry.getKey().endsWith(".class") && !entry.getKey().startsWith(SKIP_PACKAGE)) {
+                    byte[] rewritten = RaceTransform.transform(reader.parse(entry.getValue()), writer, raceSites);
+                    if (rewritten != null) {
+                        entry.setValue(rewritten);
+                        raceClasses++;
+                    }
+                }
+            }
+
+            entries.put("tickless-race-sites.txt", (String.join("\n", raceSites) + "\n").getBytes(StandardCharsets.UTF_8));
+            System.out.println("Race check: hooked " + raceSites.size() + " collection and iterator calls in " + raceClasses + " classes");
+        }
+
         Path tmp = jar.resolveSibling(jar.getFileName() + ".tmp");
         try (OutputStream out = Files.newOutputStream(tmp); ZipOutputStream zip = new ZipOutputStream(out)) {
             for (Map.Entry<String, byte[]> entry : entries.entrySet()) {

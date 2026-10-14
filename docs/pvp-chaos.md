@@ -140,8 +140,9 @@ ZGC. CPU is the server process only.
 512 players conserved the finite gear but ran at only 0.31 player steps/s with
 67,182 pending acknowledgements; it is not a usable capacity result. Vanilla 256
 failed its participant audit. Tickless 1024 failed during shutdown with concurrent
-structure-cache updates (`StructureCheck` fastutil map rehash); this remains a known
-issue and that case is excluded from passing measurements. Raw failed diagnostics
+structure-cache updates (`StructureCheck` fastutil map rehash); the structure cache is now
+guarded (see "What is still shared" in concurrency.md), and that case is excluded from passing
+measurements. Raw failed diagnostics
 remain in `build/stress-chaos-high-tickless-1024/`.
 
 The initial real-client paired recording is `build/arena-film/pvp-chaos.mp4`

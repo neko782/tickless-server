@@ -245,10 +245,17 @@ also waits for the commit, and then hands the disconnect to the server thread wi
 for it. An entity added in an
 event is locked until the event commits, and a rollback discards it again. Moving an entity to
 another dimension or unloading it cannot be deferred, so the event becomes irrevocable
-(`WorldTxn.makeIrrevocable`): it stops logging and is never chosen as a victim. Optional
-locks taken after that use `WorldTxn.lockIfSafe`, which only takes a free lock: items arriving
+(`WorldTxn.makeIrrevocable`): it stops logging and is never chosen as a victim. Items arriving
 through a portal together each merged with the other, and the two irrevocable events waited for
-each other forever. They now skip the merge (`IrrevocableLockCheck`, `adversarial.py portal_rush`).
+each other forever (`adversarial.py portal_rush`). Any lock taken after a dimension change could
+do the same, so an event now takes a single token (`WorldTxn.IRREVOCABLE`) as it becomes
+irrevocable, while it can still be rolled back, and keeps it until it ends. At most one event is
+irrevocable at a time, so every cycle has a member to roll back: an event waiting for the token
+holding other locks is an ordinary waiter. Dimension changes and unloads inside events are rare
+enough that serializing the rest of those events costs nothing measurable. Optional locks after
+that still use `WorldTxn.lockIfSafe`, which only takes a free lock, so the token holder does not
+wait for a merge (`IrrevocableLockCheck`). The irrevocable stretches between the parts of a
+`WorldTxn.scoped` event do not take the token: explosions would serialize.
 
 A player's block action (placing, breaking, using an item) is acknowledged when its event
 commits, not at the next connection tick (`PlayerLane`, `ServerGamePacketListenerImpl.finishLaneAcks`).
@@ -294,6 +301,13 @@ A cycle can only be broken if every way a transaction waits is an edge the resol
 each member waits on, and flags a member blocked outside the graph. `-Dtickless.traceCycles=N`
 logs the first N cycles broken with every member's stack.
 
+A cycle the resolver confirms but cannot break (only the server thread, irrevocable events and
+members blocked entering a monitor) is logged as an error, "World wait cycle no rollback can
+break", once the same members have formed it for `-Dtickless.stuckCycleMillis` (default 1 s),
+with every member's stack (`StuckCycleCheck`). Before, it showed up only as a 10 s lock wait, if
+anyone waited on a world lock at all. A server thread waiting for a lock runs chunk tasks, so a
+cycle in which it waits for a lock and a member waits for the server thread is not reported.
+
 #### Holding locks for less than the whole event
 
 Locks are kept until the event ends. `WorldTxn.scoped` runs a self-contained part of an event as
@@ -334,6 +348,50 @@ only, never while waiting for a world lock:
   and spawn potentials);
 - the scoreboard: its own monitor, a leaf lock. Workers update kill, death and statistic scores
   while commands and functions change scores on the server thread.
+- the structure cache (`StructureCheck`): one latch around its maps; storage scans and generation
+  checks run outside it, and cached reference counts are replaced, never changed in place. World
+  workers (explorer maps, dolphins, eyes of ender) and chunk generation threads check structures
+  at once; a concurrent rehash crashed a 1,024-player run at shutdown.
+
+Some shared data is published whole instead: the server thread rebuilds the debug subscriber map
+each tick (`ServerDebugSubscribers`), and a stat type copies its map when it creates a stat
+(`StatType`, read on every award). The entity tracker map (`ChunkMap.entityMap`) is a
+`ConcurrentLong2ObjectMap`: workers look up an entity's tracker to broadcast its packets while
+the server thread adds and removes entities. An entity's attribute map is a `ConcurrentHashMap`:
+other entities read armor, reach and waypoint ranges without its lock while its own event adds
+attribute instances.
+
+### Finding shared collections
+
+World locks cover entities, block entities and blocks. A collection on a server-wide object is
+covered only if someone made it safe, and each one that was not (the waypoint manager, the
+entity tracker's player sets, the player list, the structure cache) crashed a stress run before it
+was fixed. `RaceCheck` finds them: built with `-PraceCheck`, the jar rewrite
+(`buildtools/RaceTransform.java`) sends every call the game makes on a java.util, fastutil or
+Guava collection or iterator through a bridge, and a server run with `-Dtickless.raceCheck=true`
+logs a "Collection race" with both threads' stacks when
+
+- two threads are inside one collection at once and either one changes it,
+- a thread changes a collection while another thread's for-each over it is open (an iteration
+  ends when its iterator is exhausted or the method that started it returns), or
+- the server thread changes a collection its own iteration is going over from a chunk task it
+  ran while that iteration waited for a world lock (see "Known gaps").
+
+Only overlaps that really happen are reported, so collections handed between threads in order
+(chunk generation stages, light engine tasks, pooled buffers) are not; a lock-set checker
+(Eraser) reported hundreds of those. One call in 32 on a collection more than one thread has used
+spins for 20 µs while it is marked, so that racing calls are likely to overlap. `isEmpty` and
+`size` are not checked: a stale answer cannot break a collection. The rewrite is never part of a
+normal build; the checked server runs several times slower.
+
+`tools/stress/races.sh` builds it into `build/install-race`, runs a self-test
+(`tools/race/RaceDetectorSelfTest.java`: rewritten fixture code must report concurrent adds and an
+add during another thread's for-each, and must not report a for-each that returned early, a
+hand-off between threads or adds under a common lock), then `basic`, `misc`, `graph` and a
+players scenario (bots joining, leaving, dying and building while commands run). It fails on any
+race not in `tools/stress/race-allowlist.txt`, which names the deliberate ones: optimistic
+`StampedLock` reads that are validated and retried. Its first runs found the entity tracker map,
+attribute maps, stat types and debug subscribers above.
 
 Commands and datapack functions (including `#minecraft:tick` functions) run in the server
 thread's transaction while workers keep going; their block and entity writes lock like any other
@@ -587,13 +645,16 @@ ownership, concurrent additions, ticket changes, save and reload.
   chunk load can finish. Any server-thread loop that can wait on a lock can therefore see its
   data change underneath it. This crashed `PersistentEntitySectionManager.processUnloads`
   (fastutil iterator NPE) when power-127 fireballs held entity locks while chunks unloaded; that
-  loop now iterates a copy, but other loops with the same shape may remain.
+  loop now iterates a copy. The race check reports any other loop with this shape that a stress
+  run reaches, but loops no run reaches may remain.
 - 100 power-127 fireballs at once (`/function fireballs:rain`) no longer hang or crash the
   server, and the server thread stays responsive, but entities stall for tens of seconds while
   the explosions, each breaking millions of blocks, finish. Vanilla freezes entirely.
 - A rollback does not undo everything (see "Rollbacks"), and an event that became irrevocable
-  (it moved an entity to another dimension, or committed a scoped part) cannot be rolled back; a
-  cycle of only such events, monitors and the server thread is reported as a 10 s wait.
+  (it moved an entity to another dimension, or committed a scoped part) cannot be rolled back.
+  Only one event at a time can become irrevocable by a dimension change, but the stretches
+  between scoped parts do not take that token; a cycle of such stretches, monitors and the
+  server thread is reported as an error after a second.
 
 - Shutdown after `gen_heavy.py chunkgen` once waited forever for chunk-map work and has not
   recurred. A light update that throws could have caused it (it left the "update scheduled"

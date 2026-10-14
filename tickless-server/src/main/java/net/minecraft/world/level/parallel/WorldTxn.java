@@ -40,6 +40,8 @@ public final class WorldTxn {
     public static final LongAdder ABORTS = new LongAdder();
     // Rollbacks asked for by the server thread after waiting for a lock (the rest break cycles).
     public static final LongAdder WOUNDS = new LongAdder();
+    // Wait cycles no rollback can break, reported by the deadlock resolver.
+    public static final LongAdder STUCK_CYCLES = new LongAdder();
     // A player action that changed more blocks than this is acknowledged by the connection tick.
     static final int MAX_TRACKED_BLOCK_CHANGES = 64;
     // Start stamps: the smaller, the older. Survives retries; the server thread is oldest.
@@ -60,6 +62,12 @@ public final class WorldTxn {
      * server thread (a chunk load) waits for it, so the deadlock resolver sees that edge.
      */
     static final WorldLock SERVER_THREAD = new WorldLock();
+    /**
+     * Held by the one worker event that cannot be rolled back (see {@link #makeIrrevocable}) until
+     * it ends. Two irrevocable events waiting for each other form a cycle no rollback can break;
+     * with at most one of them, every cycle has a member that can be rolled back.
+     */
+    static final WorldLock IRREVOCABLE = new WorldLock();
     private static final Object[] NO_MONITORS = new Object[0];
     // Transactions that entered a monitor during their event, to find who holds a monitor. A
     // transaction joins on its first monitor and leaves when its event ends: joining and leaving
@@ -448,10 +456,17 @@ public final class WorldTxn {
     /**
      * Stops logging for the rest of this event (or scoped part): it will not be rolled back. For
      * changes that cannot be undone, such as moving an entity to another dimension.
+     *
+     * <p>The event first takes {@link #IRREVOCABLE}, while it can still be rolled back, and keeps
+     * it until it ends. Items arriving through a portal together each merged with the other while
+     * both were irrevocable, and the two waited for each other forever; any lock taken after a
+     * dimension change could do the same. Waiting for the token holding other locks is an
+     * ordinary wait the deadlock resolver can break by rolling this event back.
      */
     public static void makeIrrevocable() {
         WorldTxn txn = currentWorker();
         if (txn != null && txn.revocable) {
+            txn.lock(IRREVOCABLE);
             txn.revocable = false;
             if (txn.log != null) {
                 txn.log.clear();
@@ -971,11 +986,18 @@ public final class WorldTxn {
         Runnable pump = mainThreadPump;
         if (pump != null && !pumping && Thread.currentThread() == mainThreadRef) {
             pumping = true;
+            if (RaceCheck.ENABLED) {
+                RaceCheck.pumping(true);
+            }
+
             try {
                 pump.run();
                 if (FABRIC) pollModReplays();
             } finally {
                 pumping = false;
+                if (RaceCheck.ENABLED) {
+                    RaceCheck.pumping(false);
+                }
             }
         }
     }

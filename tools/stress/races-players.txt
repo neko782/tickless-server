@@ -1,0 +1,31 @@
+gamerule spawn_mobs false
+gamerule advance_time true
+forceload add -32 -32 31 31
+sleep 5
+fill -32 199 -32 31 199 31 minecraft:stone
+setworldspawn 0 200 0
+gamerule respawn_radius 0
+summon minecraft:zombie 4 200 4 {PersistenceRequired:1b}
+summon minecraft:villager -4 200 -4
+sleep 2
+bots 24 30
+sleep 6
+bots 16 12
+give @a minecraft:stone 64
+sleep 3
+effect give @a minecraft:speed 5 1
+give @a minecraft:diamond_sword 1
+tp @a 0 200 0
+sleep 3
+say broadcast while players join and leave
+weather rain
+sleep 3
+kill @a[limit=8]
+gamemode creative @a[limit=4]
+sleep 3
+bots 16 8
+give @a minecraft:stone 64
+sleep 4
+gamemode survival @a
+weather clear
+sleep 14

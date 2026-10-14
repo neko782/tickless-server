@@ -1,0 +1,112 @@
+--- a/net/minecraft/world/level/levelgen/structure/StructureCheck.java
++++ b/net/minecraft/world/level/levelgen/structure/StructureCheck.java
+@@ -59,6 +_,10 @@
+     private final Long2ObjectMap<Object2IntMap<Structure>> loadedChunks = new Long2ObjectOpenHashMap<>();
+     private final Map<Structure, Long2BooleanMap> featureChecks = new HashMap<>();
+     private final LongSet chunksWithoutStartsInStorage = new LongOpenHashSet();
++    // World workers (maps, dolphins, eyes of ender), chunk generation threads and commands check
++    // structures at once. The three maps above are only used under this latch; storage scans and
++    // generation checks run outside it, and cached reference counts are replaced, never changed.
++    private final Object cacheLock = new Object();
+ 
+     public StructureCheck(
+         final ChunkScanAccess storageAccess,
+@@ -87,31 +_,53 @@
+ 
+     public StructureCheckResult checkStart(final ChunkPos pos, final Structure structure, final StructurePlacement placement, final boolean requireUnreferenced) {
+         long posKey = pos.pack();
+-        Object2IntMap<Structure> cachedResult = this.loadedChunks.get(posKey);
++        Object2IntMap<Structure> cachedResult;
++        boolean scanStorage;
++        synchronized (this.cacheLock) {
++            cachedResult = this.loadedChunks.get(posKey);
++            scanStorage = !this.chunksWithoutStartsInStorage.contains(posKey);
++        }
++
+         if (cachedResult != null) {
+             return this.checkStructureInfo(cachedResult, structure, requireUnreferenced);
+         }
+ 
+-        if (!this.chunksWithoutStartsInStorage.contains(posKey)) {
++        if (scanStorage) {
+             StructureCheckResult storageCheckResult = this.tryLoadFromStorage(pos, structure, requireUnreferenced);
+             if (storageCheckResult != null) {
+                 return storageCheckResult;
+             }
+ 
+-            if (this.chunksWithoutStartsInStorage.size() >= 131072) {
+-                this.chunksWithoutStartsInStorage.clear();
+-            }
++            synchronized (this.cacheLock) {
++                if (this.chunksWithoutStartsInStorage.size() >= 131072) {
++                    this.chunksWithoutStartsInStorage.clear();
++                }
+ 
+-            this.chunksWithoutStartsInStorage.add(posKey);
++                this.chunksWithoutStartsInStorage.add(posKey);
++            }
+         }
+ 
+         if (!placement.applyAdditionalChunkRestrictions(pos.x(), pos.z(), this.seed)) {
+             return StructureCheckResult.START_NOT_PRESENT;
+         }
+ 
+-        boolean isFeatureChunk = this.featureChecks
+-            .computeIfAbsent(structure, k -> new Long2BooleanOpenHashMap())
+-            .computeIfAbsent(posKey, k -> this.canCreateStructure(pos, structure));
++        Boolean known;
++        synchronized (this.cacheLock) {
++            Long2BooleanMap checks = this.featureChecks.get(structure);
++            known = checks != null && checks.containsKey(posKey) ? checks.get(posKey) : null;
++        }
++
++        boolean isFeatureChunk;
++        if (known != null) {
++            isFeatureChunk = known;
++        } else {
++            // Deterministic, so two threads computing it at once agree.
++            isFeatureChunk = this.canCreateStructure(pos, structure);
++            synchronized (this.cacheLock) {
++                this.featureChecks.computeIfAbsent(structure, k -> new Long2BooleanOpenHashMap()).put(posKey, isFeatureChunk);
++            }
++        }
++
+         return !isFeatureChunk ? StructureCheckResult.START_NOT_PRESENT : StructureCheckResult.CHUNK_LOAD_NEEDED;
+     }
+ 
+@@ -225,21 +_,23 @@
+     }
+ 
+     private void storeFullResults(final long posKey, final Object2IntMap<Structure> starts) {
+-        this.loadedChunks.put(posKey, deduplicateEmptyMap(starts));
+-        this.featureChecks.values().forEach(m -> m.remove(posKey));
+-        this.chunksWithoutStartsInStorage.remove(posKey);
++        synchronized (this.cacheLock) {
++            this.loadedChunks.put(posKey, deduplicateEmptyMap(starts));
++            this.featureChecks.values().forEach(m -> m.remove(posKey));
++            this.chunksWithoutStartsInStorage.remove(posKey);
++        }
+     }
+ 
+     public void incrementReference(final ChunkPos chunkPos, final Structure structure) {
+         long posKey = chunkPos.pack();
+-        this.loadedChunks.compute(posKey, (key, counts) -> {
+-            if (counts == null || counts.isEmpty()) {
+-                counts = new Object2IntOpenHashMap<>();
+-            }
+-
+-            counts.computeInt(structure, (k, value) -> value == null ? 1 : value + 1);
+-            return counts;
+-        });
+-        this.chunksWithoutStartsInStorage.remove(posKey);
++        synchronized (this.cacheLock) {
++            // Copied, not changed in place: checkStart reads cached counts outside the latch.
++            this.loadedChunks.compute(posKey, (key, counts) -> {
++                Object2IntMap<Structure> updated = counts == null || counts.isEmpty() ? new Object2IntOpenHashMap<>() : new Object2IntOpenHashMap<>(counts);
++                updated.computeInt(structure, (k, value) -> value == null ? 1 : value + 1);
++                return updated;
++            });
++            this.chunksWithoutStartsInStorage.remove(posKey);
++        }
+     }
+ }

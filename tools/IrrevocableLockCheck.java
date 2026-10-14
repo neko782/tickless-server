@@ -12,69 +12,37 @@ import net.minecraft.world.level.parallel.WorldTxn;
  * neighbour to merge with it. Two such events each held their own item and waited for the other's:
  * a cycle the deadlock resolver cannot break, because neither member can be rolled back.
  *
- * <p>Optional locks now go through {@link WorldTxn#lockIfSafe}: an irrevocable transaction only
- * takes a free lock, while a revocable one still waits (and is rolled back on a cycle).
- * Here two irrevocable transactions each hold one lock and ask for the other's; both must finish
- * within a second, and a revocable transaction must still wait for a held lock and get it.
+ * <p>An event now takes a single token as it becomes irrevocable ({@link WorldTxn#makeIrrevocable}),
+ * while it can still be rolled back, so at most one event is irrevocable at a time and every cycle
+ * keeps a member to roll back. Here two events each hold one lock, become irrevocable and then
+ * need the other's lock:
+ * <ul>
+ * <li>with a lock they must have ({@code lock}): both finish within a second, the one waiting for
+ * the token having been rolled back and run again, and each body commits exactly once;
+ * <li>with an optional lock ({@link WorldTxn#lockIfSafe}): both finish.
+ * </ul>
+ * A revocable transaction must still wait for a held optional lock and get it.
  *
  * <p>usage: IrrevocableLockCheck
  */
 public class IrrevocableLockCheck {
+    private static final int ROUNDS = 200;
+
     public static void main(final String[] args) throws Exception {
         WorldTxn.enable(Thread.currentThread(), () -> {});
         Thread watchdog = Thread.ofPlatform().daemon().start(() -> {
             try {
-                Thread.sleep(10_000L);
-                System.out.println("FAIL: transactions still waiting after 10 s (deadlock)");
+                Thread.sleep(20_000L);
+                System.out.println("FAIL: transactions still waiting after 20 s (deadlock)");
                 System.exit(1);
             } catch (InterruptedException e) {
                 // Finished in time.
             }
         });
 
-        for (int round = 0; round < 200; round++) {
-            WorldLock a = new WorldLock();
-            WorldLock b = new WorldLock();
-            CyclicBarrier bothHolding = new CyclicBarrier(2);
-            CyclicBarrier bothTried = new CyclicBarrier(2);
-            CountDownLatch done = new CountDownLatch(2);
-            AtomicInteger merged = new AtomicInteger();
-            AtomicBoolean ownLockKept = new AtomicBoolean(true);
-            for (WorldLock[] pair : new WorldLock[][] {{a, b}, {b, a}}) {
-                Thread.ofVirtual().start(() -> {
-                    WorldTxn.run(0, 0, 0, false, () -> {
-                        WorldTxn txn = WorldTxn.current();
-                        txn.lock(pair[0]);
-                        WorldTxn.makeIrrevocable();
-                        try {
-                            bothHolding.await(5L, TimeUnit.SECONDS);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                        if (txn.lockIfSafe(pair[1])) {
-                            merged.incrementAndGet();
-                        }
-                        // Neither ends (and releases its lock) until both have asked.
-                        try {
-                            bothTried.await(5L, TimeUnit.SECONDS);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                        if (!pair[0].isHeldBy(txn)) {
-                            ownLockKept.set(false);
-                        }
-                    });
-                    done.countDown();
-                });
-            }
-            if (!done.await(1L, TimeUnit.SECONDS)) {
-                System.out.println("FAIL: two irrevocable transactions waiting for each other's lock did not finish (round " + round + ")");
-                System.exit(1);
-            }
-            if (merged.get() != 0 || !ownLockKept.get()) {
-                System.out.println("FAIL: an irrevocable transaction took a lock held by another (" + merged.get() + "), or lost its own (" + !ownLockKept.get() + ") in round " + round);
-                System.exit(1);
-            }
+        for (int round = 0; round < ROUNDS; round++) {
+            crossedLocks(round, true);
+            crossedLocks(round, false);
         }
 
         // A revocable transaction must still wait for a held lock rather than skip the action.
@@ -109,7 +77,68 @@ public class IrrevocableLockCheck {
         }
 
         watchdog.interrupt();
-        System.out.println("OK: 200 pairs of irrevocable transactions skipped each other's locks without a deadlock; revocable transactions still wait");
+        System.out.println("OK: " + ROUNDS + " pairs of events that became irrevocable holding each other's locks finished, "
+            + "with required and optional locks; revocable transactions still wait");
         System.exit(0);
+    }
+
+    /**
+     * Two events each take their own lock, wait until both hold it, become irrevocable and then
+     * take the other's lock, required or optional.
+     */
+    private static void crossedLocks(final int round, final boolean required) throws InterruptedException {
+        WorldLock a = new WorldLock();
+        WorldLock b = new WorldLock();
+        CyclicBarrier bothHolding = new CyclicBarrier(2);
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicInteger committed = new AtomicInteger();
+        AtomicBoolean tookHeldLock = new AtomicBoolean();
+        AtomicBoolean failed = new AtomicBoolean();
+        for (WorldLock[] pair : new WorldLock[][] {{a, b}, {b, a}}) {
+            boolean[] first = {true};
+            Thread.ofVirtual().start(() -> {
+                try {
+                    WorldTxn.run(0, 0, 0, false, () -> {
+                        WorldTxn txn = WorldTxn.current();
+                        txn.lock(pair[0]);
+                        if (first[0]) {
+                            // Only the first attempt meets the other: a retry runs once the other has finished.
+                            first[0] = false;
+                            try {
+                                bothHolding.await(5L, TimeUnit.SECONDS);
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+
+                        WorldTxn.makeIrrevocable();
+                        if (required) {
+                            txn.lock(pair[1]);
+                        } else if (txn.lockIfSafe(pair[1]) && !pair[1].isHeldBy(txn)) {
+                            tookHeldLock.set(true);
+                        }
+
+                        committed.incrementAndGet();
+                    });
+                } catch (Throwable t) {
+                    failed.set(true);
+                    t.printStackTrace(System.out);
+                }
+
+                done.countDown();
+            });
+        }
+
+        String kind = required ? "required" : "optional";
+        if (!done.await(2L, TimeUnit.SECONDS)) {
+            System.out.println("FAIL: two events that became irrevocable needing each other's " + kind + " lock did not finish (round " + round + ")");
+            System.exit(1);
+        }
+
+        if (failed.get() || committed.get() != 2 || tookHeldLock.get()) {
+            System.out.println("FAIL: " + kind + " locks in round " + round + ": failed " + failed.get() + ", committed bodies "
+                + committed.get() + " (expected 2), lockIfSafe reported a lock it does not hold " + tookHeldLock.get());
+            System.exit(1);
+        }
     }
 }

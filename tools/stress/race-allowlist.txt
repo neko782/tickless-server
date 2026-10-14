@@ -1,0 +1,5 @@
+# Races the race check (RaceCheck, tools/stress/races.sh) reports that are harmless, as call site
+# pairs without line numbers: "A | B  # why". Keep this short: a race listed here is one nobody
+# will look at again.
+Long2ByteMap.get in SimulationChunkTracker.getLevel | Long2ByteMap.put in SimulationChunkTracker.setLevel  # DistanceManager.readLevel: optimistic StampedLock read, validated and retried under the read lock
+Long2ByteMap.get in SimulationChunkTracker.getLevel | Long2ByteMap.remove in SimulationChunkTracker.setLevel  # same

@@ -124,6 +124,10 @@ dump_and_kill() {
       dump_and_kill "world wait the deadlock resolver cannot see, see $dir/out.log"
       break
     fi
+    if grep -q 'World wait cycle no rollback can break' "$dir/out.log" 2>/dev/null; then
+      dump_and_kill "wait cycle without a rollback victim, see $dir/out.log"
+      break
+    fi
     if [ "${LOCK_WAIT_KILL:-1}" = 1 ] && grep -q 'has waited 10s for a world lock' "$dir/out.log" 2>/dev/null; then
       dump_and_kill "world lock wait over 10s, see $dir/threads.txt"
       break

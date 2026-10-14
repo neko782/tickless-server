@@ -1,0 +1,21 @@
+--- a/net/minecraft/world/entity/ai/attributes/AttributeMap.java
++++ b/net/minecraft/world/entity/ai/attributes/AttributeMap.java
+@@ -1,7 +_,6 @@
+ package net.minecraft.world.entity.ai.attributes;
+ 
+ import com.google.common.collect.Multimap;
+-import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
+ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+ import java.util.ArrayList;
+ import java.util.Collection;
+@@ -14,7 +_,9 @@
+ import org.jspecify.annotations.Nullable;
+ 
+ public class AttributeMap {
+-    private final Map<Holder<Attribute>, AttributeInstance> attributes = new Object2ObjectOpenHashMap<>();
++    // Other entities' events read attribute values (armor, reach, waypoint range) without the
++    // owner's lock while the owner's event adds instances; a plain hash map can be mid-rehash.
++    private final Map<Holder<Attribute>, AttributeInstance> attributes = new java.util.concurrent.ConcurrentHashMap<>();
+     private final Set<AttributeInstance> attributesToSync = new ObjectOpenHashSet<>();
+     private final Set<AttributeInstance> attributesToUpdate = new ObjectOpenHashSet<>();
+     private final AttributeSupplier supplier;

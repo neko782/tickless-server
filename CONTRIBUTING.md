@@ -52,6 +52,7 @@ New classes go in `tickless-server/src/main/java` (Minecraft packages are fine t
 ./test.sh 5                         # all regression scenarios (needs Docker), 5 s of load each
 ./test.sh 5 focused                 # only the focused Java checks
 tools/check.sh LevelTicksCheck      # one focused check
+tools/stress/races.sh 10            # collection race check build: unguarded shared collections
 ```
 
 `./test.sh` builds into `build/install-dev`, so it never replaces the jar of a server you are

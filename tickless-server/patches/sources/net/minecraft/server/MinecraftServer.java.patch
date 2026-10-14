@@ -213,7 +213,7 @@
          this.packetProcessor.close();
          if (this.metricsRecorder.isRecording()) {
              this.cancelRecordingMetrics();
-@@ -646,17 +_,32 @@
+@@ -646,17 +_,33 @@
              }
          }
  
@@ -245,6 +245,7 @@
          }
  
 +        net.minecraft.world.level.parallel.WorldOwnership.logSummary();
++        net.minecraft.world.level.parallel.RaceCheck.logSummary();
          this.saveAllChunks(false, true, false);
  
          for (ServerLevel level : this.getAllLevels()) {

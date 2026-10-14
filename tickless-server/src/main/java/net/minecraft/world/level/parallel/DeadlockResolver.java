@@ -24,6 +24,12 @@ final class DeadlockResolver {
     private static final ReentrantLock GRAPH = new ReentrantLock();
     // -Dtickless.traceCycles=N logs the first N cycles broken, with each member's stack.
     private static final AtomicInteger TRACE = new AtomicInteger(Integer.getInteger("tickless.traceCycles", 0));
+    // A cycle without a victim must last this long before it is reported.
+    private static final long STUCK_NANOS = Long.getLong("tickless.stuckCycleMillis", 1_000L) * 1_000_000L;
+    // The last cycle seen without a victim, and when it was first seen. Guarded by GRAPH.
+    private static List<WorldTxn> stuck = List.of();
+    private static long stuckSince;
+    private static boolean reportedStuck;
 
     private DeadlockResolver() {
     }
@@ -70,9 +76,10 @@ final class DeadlockResolver {
                     }
 
                     // With no victim the cycle is either stale (the graph is read without stopping
-                    // anyone) or made only of monitors, the server thread and irrevocable events; a
-                    // real one shows up in the 10 s long-wait report.
-                    if (victim != null) {
+                    // anyone) or made only of monitors, the server thread and irrevocable events.
+                    if (victim == null) {
+                        noVictim(chain.subList(cycleStart, chain.size()));
+                    } else {
                         victim.requestAbort();
                         if (TRACE.get() > 0 && TRACE.getAndDecrement() > 0) {
                             trace(chain.subList(cycleStart, chain.size()), victim);
@@ -87,6 +94,64 @@ final class DeadlockResolver {
         } finally {
             GRAPH.unlock();
         }
+    }
+
+    /**
+     * Reports a cycle no rollback can break once the same members have formed it for
+     * {@code tickless.stuckCycleMillis}. A server thread waiting for a world lock runs chunk tasks
+     * meanwhile, so a member waiting for the server thread in such a cycle is not stuck.
+     */
+    private static void noVictim(final List<WorldTxn> cycle) {
+        boolean pumping = false;
+        boolean needsServer = false;
+        for (WorldTxn member : cycle) {
+            pumping |= member.mainThread && member.waitingFor != null;
+            needsServer |= member.waitingFor == WorldTxn.SERVER_THREAD;
+        }
+
+        if (pumping && needsServer) {
+            return;
+        }
+
+        long now = System.nanoTime();
+        if (!sameMembers(stuck, cycle)) {
+            stuck = List.copyOf(cycle);
+            stuckSince = now;
+            return;
+        }
+
+        if (reportedStuck || now - stuckSince < STUCK_NANOS) {
+            return;
+        }
+
+        reportedStuck = true;
+        WorldTxn.STUCK_CYCLES.increment();
+        StringBuilder out = new StringBuilder("World wait cycle no rollback can break, for ")
+            .append((now - stuckSince) / 1_000_000L).append(" ms:");
+        for (WorldTxn member : cycle) {
+            WorldLock lock = member.waitingFor;
+            out.append("\n  ").append(member).append(" waits for ")
+                .append(lock == WorldTxn.SERVER_THREAD ? "the server thread" : lock == WorldTxn.IRREVOCABLE ? "the irrevocable token" : lock != null ? lock : "monitor " + member.waitingMonitor);
+            for (StackTraceElement frame : member.thread.getStackTrace()) {
+                out.append("\n      at ").append(frame);
+            }
+        }
+
+        WorldTxn.LOGGER.error(out.toString());
+    }
+
+    private static boolean sameMembers(final List<WorldTxn> a, final List<WorldTxn> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+
+        for (WorldTxn member : b) {
+            if (!a.contains(member)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void trace(final List<WorldTxn> cycle, final WorldTxn victim) {

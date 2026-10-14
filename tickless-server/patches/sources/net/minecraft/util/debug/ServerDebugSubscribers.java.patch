@@ -1,0 +1,33 @@
+--- a/net/minecraft/util/debug/ServerDebugSubscribers.java
++++ b/net/minecraft/util/debug/ServerDebugSubscribers.java
+@@ -13,7 +_,9 @@
+ 
+ public class ServerDebugSubscribers {
+     private final MinecraftServer server;
+-    private final Map<DebugSubscription<?>, List<ServerPlayer>> enabledSubscriptions = new HashMap<>();
++    // Rebuilt by the server thread each tick and read by world workers (entities ask whether anyone
++    // subscribes to their debug data), so it is published whole and never changed in place.
++    private volatile Map<DebugSubscription<?>, List<ServerPlayer>> enabledSubscriptions = Map.of();
+ 
+     public ServerDebugSubscribers(final MinecraftServer server) {
+         this.server = server;
+@@ -24,15 +_,16 @@
+     }
+ 
+     public void tick() {
+-        this.enabledSubscriptions.values().forEach(List::clear);
++        Map<DebugSubscription<?>, List<ServerPlayer>> subscriptions = new HashMap<>();
+ 
+         for (ServerPlayer player : this.server.getPlayerList().getPlayers()) {
+             for (DebugSubscription<?> subscription : player.debugSubscriptions()) {
+-                this.enabledSubscriptions.computeIfAbsent(subscription, s -> new ArrayList<>()).add(player);
++                subscriptions.computeIfAbsent(subscription, s -> new ArrayList<>()).add(player);
+             }
+         }
+ 
+-        this.enabledSubscriptions.values().removeIf(List::isEmpty);
++        subscriptions.replaceAll((subscription, players) -> List.copyOf(players));
++        this.enabledSubscriptions = Map.copyOf(subscriptions);
+     }
+ 
+     public void broadcastToAll(final DebugSubscription<?> subscription, final Packet<?> packet) {

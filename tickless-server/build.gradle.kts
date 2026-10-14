@@ -101,13 +101,16 @@ tasks.jar {
     val tool = buildtools.runtimeClasspath
     val libs = sourceSets.main.get().runtimeClasspath.filter { it.name.endsWith(".jar") }
     inputs.files(tool)
+    inputs.property("raceCheck", project.hasProperty("raceCheck"))
     dependsOn(tasks.named(buildtools.classesTaskName))
     doLast {
         val result = providers.javaexec {
             executable = launcher.get().executablePath.asFile.absolutePath
             classpath = tool
             mainClass = "OwnershipTransform"
-            args(listOf(archiveFile.get().asFile.absolutePath) + libs.files.map { it.absolutePath })
+            // -PraceCheck adds the collection race check hooks (RaceCheck); never for a release.
+            val races = if (project.hasProperty("raceCheck")) listOf("--races") else listOf()
+            args(races + listOf(archiveFile.get().asFile.absolutePath) + libs.files.map { it.absolutePath })
         }
         println(result.standardOutput.asText.get().trim())
     }

@@ -1,5 +1,14 @@
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
+@@ -7,8 +_,6 @@
+ import com.google.common.collect.ImmutableList.Builder;
+ import com.mojang.datafixers.DataFixer;
+ import com.mojang.logging.LogUtils;
+-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.Long2ByteMap;
+ import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.Long2LongMap;
 @@ -71,6 +_,7 @@
  import net.minecraft.util.profiling.ProfilerFiller;
  import net.minecraft.util.thread.BlockableEventLoop;
@@ -17,7 +26,14 @@
  import net.minecraft.world.level.gamerules.GameRules;
  import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
  import net.minecraft.world.level.levelgen.NoiseRouterData;
-@@ -146,10 +_,14 @@
+@@ -142,14 +_,20 @@
+     private final ChunkStatusUpdateListener chunkStatusListener;
+     private final ChunkMap.DistanceManager distanceManager;
+     private final PlayerMap playerMap = new PlayerMap();
+-    private final Int2ObjectMap<ChunkMap.TrackedEntity> entityMap = new Int2ObjectOpenHashMap<>();
++    // Changed by the server thread only; world workers look up an entity's tracker to broadcast its
++    // packets, and a lookup during a rehash of a plain map can miss or throw.
++    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<ChunkMap.TrackedEntity> entityMap = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
      private final Long2ByteMap chunkTypeCache = new Long2ByteOpenHashMap();
      private final Long2LongMap nextChunkSaveTime = new Long2LongOpenHashMap();
      private final LongSet chunksToEagerlySave = new LongLinkedOpenHashSet();
@@ -198,7 +214,7 @@
              }
  
              player.setChunkTrackingView(ChunkTrackingView.EMPTY);
-@@ -1056,8 +_,11 @@
+@@ -1056,13 +_,16 @@
          }
      }
  
@@ -212,6 +228,12 @@
          player.setLastSectionPos(pos);
      }
  
+     public void move(final ServerPlayer player) {
+-        for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
++        for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.valuesSnapshot()) {
+             if (trackedEntity.entity == player) {
+                 trackedEntity.updatePlayers(this.level.players());
+             } else {
 @@ -1076,7 +_,7 @@
          boolean ignored = this.skipPlayer(player);
          boolean positionChanged = oldSection.asLong() != newSection.asLong();
@@ -234,16 +256,37 @@
          if (!(entity instanceof EnderDragonPart)) {
              EntityType<?> type = entity.getType();
              int range = type.clientTrackingRange() * 16;
-@@ -1188,6 +_,8 @@
+@@ -1156,7 +_,7 @@
+                 if (entity instanceof ServerPlayer player) {
+                     this.updatePlayerStatus(player, true);
+ 
+-                    for (ChunkMap.TrackedEntity e : this.entityMap.values()) {
++                    for (ChunkMap.TrackedEntity e : this.entityMap.valuesSnapshot()) {
+                         if (e.entity != player) {
+                             e.updatePlayer(player);
+                         }
+@@ -1170,7 +_,7 @@
+         if (entity instanceof ServerPlayer player) {
+             this.updatePlayerStatus(player, false);
+ 
+-            for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
++            for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.valuesSnapshot()) {
+                 trackedEntity.removePlayer(player);
+             }
+         }
+@@ -1188,8 +_,10 @@
  
          List<ServerPlayer> movedPlayers = Lists.newArrayList();
          List<ServerPlayer> players = this.level.players();
 +        List<ServerEntity> changed = new ArrayList<>(this.entityMap.size());
 +        List<ServerEntity> changedOnServerThread = new ArrayList<>();
  
-         for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
+-        for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
++        for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.valuesSnapshot()) {
              SectionPos oldPos = trackedEntity.lastSectionPos;
-@@ -1203,9 +_,21 @@
+             SectionPos newPos = SectionPos.of(trackedEntity.entity);
+             boolean sectionPosChanged = !Objects.equals(oldPos, newPos);
+@@ -1203,12 +_,24 @@
              }
  
              if (sectionPosChanged || trackedEntity.entity.needsSync || this.distanceManager.inEntityTickingRange(newPos.chunk().pack())) {
@@ -265,7 +308,20 @@
 +        changedOnServerThread.forEach(ServerEntity::sendChanges);
  
          if (!movedPlayers.isEmpty()) {
-             for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
+-            for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
++            for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.valuesSnapshot()) {
+                 trackedEntity.updatePlayers(movedPlayers);
+             }
+         }
+@@ -1243,7 +_,7 @@
+     }
+ 
+     public void forEachEntityTrackedBy(final ServerPlayer player, final Consumer<Entity> consumer) {
+-        for (ChunkMap.TrackedEntity entity : this.entityMap.values()) {
++        for (ChunkMap.TrackedEntity entity : this.entityMap.valuesSnapshot()) {
+             if (entity.seenBy.contains(player.connection)) {
+                 consumer.accept(entity.entity);
+             }
 @@ -1276,6 +_,17 @@
  
      void onFullChunkStatusChange(final ChunkPos pos, final FullChunkStatus status) {

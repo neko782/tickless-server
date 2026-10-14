@@ -1,0 +1,47 @@
+--- a/net/minecraft/stats/StatType.java
++++ b/net/minecraft/stats/StatType.java
+@@ -11,7 +_,9 @@
+ 
+ public class StatType<T> implements Iterable<Stat<T>> {
+     private final Registry<T> registry;
+-    private final Map<T, Stat<T>> map = new IdentityHashMap<>();
++    // World workers award stats at once. Stats are created once per value and looked up on every
++    // award, so the map is replaced with a copy when a stat is added and never changed in place.
++    private volatile Map<T, Stat<T>> map = new IdentityHashMap<>();
+     private final Component displayName;
+     private final StreamCodec<RegistryFriendlyByteBuf, Stat<T>> streamCodec;
+ 
+@@ -30,7 +_,23 @@
+     }
+ 
+     public Stat<T> get(final T argument, final StatFormatter formatter) {
+-        return this.map.computeIfAbsent(argument, t -> new Stat<>(this, (T)t, formatter));
++        Stat<T> stat = this.map.get(argument);
++        if (stat != null) {
++            return stat;
++        }
++
++        synchronized (this) {
++            Map<T, Stat<T>> current = this.map;
++            stat = current.get(argument);
++            if (stat == null) {
++                Map<T, Stat<T>> added = new IdentityHashMap<>(current);
++                stat = new Stat<>(this, argument, formatter);
++                added.put(argument, stat);
++                this.map = added;
++            }
++
++            return stat;
++        }
+     }
+ 
+     public Registry<T> getRegistry() {
+@@ -39,7 +_,7 @@
+ 
+     @Override
+     public Iterator<Stat<T>> iterator() {
+-        return this.map.values().iterator();
++        return java.util.Collections.unmodifiableCollection(this.map.values()).iterator();
+     }
+ 
+     public Stat<T> get(final T argument) {
