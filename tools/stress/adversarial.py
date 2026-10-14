@@ -40,6 +40,13 @@ def collect_items(value, out):
             count = value.get('count', 1)
             if type(count) is not int or count < 1:
                 raise ValueError(f'Invalid item count in {value}')
+            components = value.get('components', {})
+            contents = components.get('minecraft:container') if isinstance(components, dict) else None
+            if contents:
+                # Count nested contents separately, so moving items in or out is conserved.
+                components = {k: v for k, v in components.items() if k != 'minecraft:container'}
+                collect_items([entry.get('item') for entry in contents], out)
+                value = dict(value, components=components)
             out[item_key(value)] += count
         else:  # equipment: slot -> item
             for part in value.values():
@@ -76,6 +83,9 @@ def parse_logs(logs):
                 head, data = line.split(' data: ', 1)
                 if kind == 'items':
                     collect_items(Snbt(data).parse(), audits[active]['items'])
+                elif kind == 'xp':
+                    orb = Snbt(data).parse()
+                    audits[active]['items']['xp'] += orb.get('Value', 0) * orb.get('Count', 1)
                 elif kind == 'uuid':
                     name = head.split(': ', 1)[-1].rsplit(' has the following', 1)[0]
                     ints = re.findall(r'-?\d+', data)
@@ -130,6 +140,13 @@ def check_run(directory, manifest):
             if dups:
                 problems.append(f'{name}: {len(dups)} duplicated entity UUIDs, e.g. {dups[:3]}')
             summary.append(f'{name}: {sum(current["items"].values())} items, {len(current["uuids"])} entities')
+            if meta.get('units'):
+                for audit in (base, current):
+                    if audit.get('converted'):
+                        continue
+                    for key, (unit, factor) in meta['units'].items():
+                        audit['items'][f'units:{unit}'] += audit['items'].pop(key, 0) * factor
+                    audit['converted'] = True
             if mode in ('equal', 'grow'):
                 growth = Counter(meta.get('growth', {})) if mode == 'grow' else Counter()
                 for key in sorted(set(base['items']) | set(current['items']) | set(growth)):
@@ -142,6 +159,15 @@ def check_run(directory, manifest):
                     problems.append(f'{name}: {len(lost)} entities lost, e.g. {sorted(lost)[:5]}')
                 if gained:
                     problems.append(f'{name}: {len(gained)} entities appeared, e.g. {sorted(gained)[:5]}')
+            elif mode == 'payload':
+                for p in PAYLOAD:
+                    key = f'minecraft:{p}'
+                    if current['items'][key] != base['items'][key]:
+                        problems.append(f'{name}: {key} {base["items"][key]} -> {current["items"][key]} ({current["items"][key] - base["items"][key]:+d})')
+            elif mode == 'entities':
+                if set(current['uuids']) != set(base['uuids']):
+                    problems.append(f'{name}: tagged entities differ: lost {len(set(base["uuids"]) - set(current["uuids"]))}, '
+                                    f'appeared {len(set(current["uuids"]) - set(base["uuids"]))}')
             elif mode == 'atmost':
                 for p in PAYLOAD:
                     key = f'minecraft:{p}'
@@ -180,7 +206,7 @@ def main():
     for workload in args.workloads or WORKLOADS:
         script = generate(workload, args.seconds, args.rounds)
         meta = {'workload': workload, 'phases': len(script.phases), 'audits': script.audits, 'checks': script.checks,
-                'growth': script.expect_growth}
+                'growth': script.expect_growth, 'units': script.units}
         manifest = out / f'{workload}.json'
         manifest.write_text(json.dumps(meta, indent=1) + '\n')
         name = f'adv-{args.label}-{workload}'

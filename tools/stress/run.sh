@@ -21,7 +21,6 @@
 # KEEP_WORLD=1 keeps build/stress-<name>/world from an earlier run (restart tests); the log of
 # the earlier run is kept as out.log.<n>.
 # A "crash" line kills the server without saving or stopping it.
-# STRESS_HEAP sets the maximum heap (default 6g).
 set -eu
 
 cd "$(dirname "$0")/../.."

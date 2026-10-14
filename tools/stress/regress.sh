@@ -8,6 +8,8 @@
 #   soundness: five extended lifecycle/component edge cases, with exact audits
 #              (SOUNDNESS_ROUNDS controls move/ride/reload repetitions, default 2)
 #   focused: packaged-engine Java checks, including scheduled-tick edge cases
+#   adversarial: item/entity conservation under chunk churn, portals, machines, pickups and
+#                server-thread container destruction (ADVERSARIAL_WORKLOADS picks them)
 # Exits non-zero if any scenario fails.
 # usage: tools/stress/regress.sh [seconds-of-load, default 5] [scenario...]
 # Set BUILD=0 to skip the build.
@@ -16,7 +18,7 @@ cd "$(dirname "$0")/../.."
 mkdir -p build
 seconds=${1:-5}
 [ "$#" -gt 0 ] && shift
-scenarios=${*:-basic misc clock graph soundness focused}
+scenarios=${*:-basic misc clock graph soundness focused adversarial}
 build_task=installDist
 install_arg=-PinstallTo=build/install-dev
 if [ "${TICKLESS_FABRIC:-0}" = 1 ]; then
@@ -93,6 +95,15 @@ for scenario in $scenarios; do
          failed="$failed soundness"
        fi
        echo "$failed" > build/regress-soundness.failed)
+      ;;
+    adversarial)
+      (if ! STRESS_HEAP=${STRESS_HEAP:-4g} python3 tools/stress/adversarial.py run regress \
+          ${ADVERSARIAL_WORKLOADS:-portal_rush churn flicker machines pickup commands xp} \
+          --install "${SERVER_INSTALL:-build/install-dev}" --seconds "$seconds" --rounds 1 \
+          > build/regress-adversarial.txt 2>&1; then
+         failed="$failed adversarial"
+       fi
+       echo "$failed" > build/regress-adversarial.failed)
       ;;
     *) echo "unknown scenario: $scenario"; failed="$failed $scenario" ;;
   esac
