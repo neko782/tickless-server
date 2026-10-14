@@ -783,6 +783,11 @@ public final class WorldTxn {
         return thread != null && thread == mainThreadRef;
     }
 
+    /** A closed admission gate needs servicing before the next network deadline. */
+    public static boolean isDrainingExclusive() {
+        return gateClosed && !exclusive;
+    }
+
     public static boolean isExclusive() {
         return exclusive;
     }

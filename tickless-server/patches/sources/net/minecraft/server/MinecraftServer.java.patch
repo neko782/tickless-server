@@ -500,7 +500,7 @@
          this.waitingForNextTick = true;
  
          try {
-@@ -858,7 +_,9 @@
+@@ -858,7 +_,11 @@
      protected void waitForTasks() {
          boolean shouldLogTime = this.isTickTimeLoggingEnabled();
          long waitStart = shouldLogTime ? Util.getNanos() : 0L;
@@ -508,10 +508,12 @@
 +        long waitNanos = this.waitingForNextTick
 +            ? Math.max(1L, this.waitDeadlineNanos() - Util.getNanos())
 +            : 100000L;
++        // A drained world must resume promptly, rather than waiting for the 50 ms network slot.
++        if (WorldTxn.isDrainingExclusive()) waitNanos = Math.min(waitNanos, 100_000L);
          LockSupport.parkNanos("waiting for tasks", waitNanos);
          if (shouldLogTime) {
              this.idleTimeNanos = this.idleTimeNanos + (Util.getNanos() - waitStart);
-@@ -872,14 +_,14 @@
+@@ -872,14 +_,18 @@
  
      @Override
      protected boolean shouldRun(final TickTask task) {
@@ -530,6 +532,10 @@
      }
  
      private boolean pollTaskInternal() {
++        if (WorldTxn.isDrainingExclusive() && WorldTxn.pollExclusive()) {
++            return true;
++        }
++
 @@ -887,6 +_,10 @@
              return true;
          }
