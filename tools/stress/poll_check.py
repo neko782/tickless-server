@@ -15,6 +15,9 @@ cases = [
     ("[Server] poll\nTest failed\nTest passed, count: 1\n[Server] poll\n", 0, 0),
     ("[Server] poll\n[Server] poll\nTest passed\nTest failed\n", 0, 1),
     ("Test failed\n[Server] poll\n", 0, 1),
+    # Vanilla-based servers: "Test passed. Count: N".
+    ("[Server] poll\nSystem chat: Test passed. Count: 1\nThe game time is 5 tick(s)\n", 0, 0),
+    ("[Server] poll\nSystem chat: Test failed. Count: 0\n", 0, 1),
 ]
 with TemporaryDirectory() as temporary:
     path = Path(temporary) / "out.log"
