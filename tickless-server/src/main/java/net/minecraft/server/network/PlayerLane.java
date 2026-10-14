@@ -127,7 +127,9 @@ public final class PlayerLane {
                     if (!player.isRemoved()) {
                         // Tracker codec/cache mutations are not world undo-log state. Acquire the
                         // source entity first, then finish this short update without replaying it.
-                        WorldTxn.makeIrrevocable();
+                        // It takes no more locks, so it skips the irrevocable token and players
+                        // are still tracked in parallel.
+                        WorldTxn.makeIrrevocableHoldingLocks();
                         action.run();
                     }
                 }, "player tracking");

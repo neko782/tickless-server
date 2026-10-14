@@ -90,6 +90,10 @@ public final class WorldLock {
     }
 
     private void acquireSlow(final WorldTxn txn) {
+        if (txn.holdingAllLocks && !txn.revocable) {
+            WorldTxn.reportInvisibleWait(txn, "waits for " + this + " after becoming irrevocable without the token");
+        }
+
         synchronized (this) {
             this.waiters++;
             if (this.parked == null) {

@@ -109,6 +109,8 @@ public final class WorldTxn {
     // Whether this transaction's writes are logged and it can be rolled back: a worker event
     // (or a scoped part of one) that has not become irrevocable.
     volatile boolean revocable;
+    // Irrevocable without the token (see makeIrrevocableHoldingLocks): it must not wait for a lock.
+    boolean holdingAllLocks;
     // Set by the deadlock resolver or the waiting server thread; the transaction rolls back at
     // its next wait or lock operation.
     private volatile boolean abortRequested;
@@ -242,6 +244,7 @@ public final class WorldTxn {
 
             if (FABRIC) MOD_ROUTE.remove();
             txn.revocable = false;
+            txn.holdingAllLocks = false;
             txn.releaseAll();
             txn.freeLog();
             ACTIVE.decrement();
@@ -271,6 +274,7 @@ public final class WorldTxn {
     private void attempt(final Runnable work) {
         while (true) {
             this.revocable = true;
+            this.holdingAllLocks = false;
             try {
                 work.run();
                 // Code that caught the abort and went on still ends here.
@@ -468,6 +472,24 @@ public final class WorldTxn {
         if (txn != null && txn.revocable) {
             txn.lock(IRREVOCABLE);
             txn.revocable = false;
+            if (txn.log != null) {
+                txn.log.clear();
+            }
+        }
+    }
+
+    /**
+     * Like {@link #makeIrrevocable}, without the token, for a short event that already holds every
+     * lock it will take. An event that never waits again cannot be in a wait cycle, so it needs no
+     * token, and many of them can run at once: player tracking makes each update irrevocable, and
+     * with the token every player on the server was tracked one at a time. A wait for a lock after
+     * this is reported (see {@link WorldLock}); it would be outside what the resolver can break.
+     */
+    public static void makeIrrevocableHoldingLocks() {
+        WorldTxn txn = currentWorker();
+        if (txn != null && txn.revocable) {
+            txn.revocable = false;
+            txn.holdingAllLocks = true;
             if (txn.log != null) {
                 txn.log.clear();
             }
