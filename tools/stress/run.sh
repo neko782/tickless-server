@@ -18,6 +18,10 @@
 # STRESS_GC selects zgc (default) or g1; STRESS_JAVA_OPTS adds explicit test JVM options.
 # STRESS_HEAP selects the maximum server heap (default 6g).
 # STRESS_IMAGE selects the Java Docker image (default eclipse-temurin:27-jdk).
+# KEEP_WORLD=1 keeps build/stress-<name>/world from an earlier run (restart tests); the log of
+# the earlier run is kept as out.log.<n>.
+# A "crash" line kills the server without saving or stopping it.
+# STRESS_HEAP sets the maximum heap (default 6g).
 set -eu
 
 cd "$(dirname "$0")/../.."
@@ -30,7 +34,14 @@ case "${STRESS_GC:-zgc}" in
   *) echo 'STRESS_GC must be zgc or g1' >&2; exit 2 ;;
 esac
 dir=build/stress-$name
-rm -rf "$dir"
+if [ "${KEEP_WORLD:-0}" = 1 ] && [ -d "$dir/world" ]; then
+  n=1
+  while [ -e "$dir/out.log.$n" ]; do n=$((n + 1)); done
+  [ -f "$dir/out.log" ] && mv "$dir/out.log" "$dir/out.log.$n"
+  rm -f "$dir/in" "$dir/failure.txt" "$dir/exit-code.txt" "$dir/cpu.log" "$dir/threads.txt" "$dir/threads-platform.txt"
+else
+  rm -rf "$dir"
+fi
 mkdir -p "$dir"
 if [ -n "${STRESS_MODS:-}" ]; then
   mkdir -p "$dir/mods"
@@ -169,6 +180,11 @@ while IFS= read -r line && kill -0 "$server" 2>/dev/null; do
         cat "$dir/failure.txt" >&2
         break
       fi
+      ;;
+    crash)
+      # Kill the server without a clean shutdown (restart tests).
+      docker kill "tickless-$name" > /dev/null 2>&1 || true
+      break
       ;;
     ''|\#*) ;;
     *) printf '%s\n' "$line" >&3 ;;
