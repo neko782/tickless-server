@@ -87,6 +87,9 @@ including a Fabric + Lithium comparison, in [docs/benchmarks.md](docs/benchmarks
   replays the youngest transaction, using an undo log of its field and block writes.
 - **Deliberate races where nobody can see them.** Entity pushing, packet dirty flags and some AI
   reads run without locks; a lost push nudge is invisible, a duplicated item is not.
+- **Idle block entities sleep.** A furnace that cannot smelt or a hopper locked by redstone stops
+  ticking until its inventory or block state changes. 16,000 of them went from 321,000 events/s
+  to about 1,100 events/s.
 - **Plus single-threaded optimizations** inspired by Lithium and Paper: cached entity-section
   bounding boxes, lazy collision contexts, AI goal and behavior gating without streams, POI
   lookup caches and moving-piston shape caches. See [docs/mod-optimizations.md](docs/mod-optimizations.md).

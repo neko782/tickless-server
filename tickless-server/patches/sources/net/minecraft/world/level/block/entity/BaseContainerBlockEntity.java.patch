@@ -1,0 +1,18 @@
+--- a/net/minecraft/world/level/block/entity/BaseContainerBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/BaseContainerBlockEntity.java
+@@ -119,6 +_,7 @@
+ 
+     @Override
+     public ItemStack removeItemNoUpdate(final int slot) {
++        this.wakeUp();
+         return ContainerHelper.takeItem(this.getItems(), slot);
+     }
+ 
+@@ -136,6 +_,7 @@
+ 
+     @Override
+     public void clearContent() {
++        this.wakeUp();
+         this.getItems().clear();
+     }
+ 

@@ -199,6 +199,35 @@ SERVER_INSTALL=build/install/vanilla TIMEOUT=400 tools/stress/run.sh lag3vanilla
 python3 tools/stress/check.py build/stress-lag3/out.log 0
 ```
 
+## Sleeping block entities
+
+The `idle` zone of `gen_lag.py`, scale 4: 16,000 block entities with nothing to do. A quarter
+each are furnaces with input but no fuel, fuel but no input, or a full output slot, and the
+last quarter are hoppers holding items, locked by redstone. 30-second window, Temurin 27,
+2026-10-14, single samples.
+
+| Sleeping block entities | World events/s | Server CPU (one core = 100%) |
+| --- | ---: | ---: |
+| off (`-Dtickless.sleepingBlockEntities=false`) | 321,064 | 57% |
+| on (default) | 1,075 | 14% |
+
+Both kept 20 steps/s. After the window the script gives one sleeper of each kind work (coal,
+raw iron, an emptied output slot, an unlocked hopper with a chest under it). Each one restarted
+within 3 s, and an untouched furnace stayed unlit.
+
+Busy block entities pay no measurable cost for the wake bookkeeping. 9,000 smelting furnaces
+(`furnaces` zone, scale 3) used 36% and 52% CPU with sleeping off and 42% and 38% with it on,
+at 181,000 events/s and 20 steps/s either way. On the saturated scale-3 lag machine, sleeping
+off gave 18.5, 14.0 and 17.0 chunk steps/s and sleeping on gave 15.8, 14.1 and 14.0. Identical
+runs on this machine vary by about ±2.5, so those samples cannot tell the two apart.
+
+```sh
+python3 tools/stress/gen_lag.py build/idle4.txt 30 4 idle
+TIMEOUT=400 tools/stress/run.sh idle-on build/idle4.txt -Dtickless.statsIntervalSeconds=5
+TIMEOUT=400 tools/stress/run.sh idle-off build/idle4.txt "-Dtickless.sleepingBlockEntities=false -Dtickless.statsIntervalSeconds=5"
+python3 tools/stress/bench_heavy.py build/stress-idle-on
+```
+
 ## Heavy non-mob workloads
 
 `tools/stress/heavy.sh <label> [workload...]` runs `gen_heavy.py` workloads; vanilla is the

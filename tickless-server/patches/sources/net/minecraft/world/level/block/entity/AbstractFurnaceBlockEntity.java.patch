@@ -1,0 +1,56 @@
+--- a/net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity.java
+@@ -70,6 +_,8 @@
+     private int cookingTimer;
+     private int cookingTotalTime;
+     private float speedMultiplier = 1.0F;
++    /** Unlit, not cooling down, and the last tick did nothing; see {@link BlockEntity#isIdle()}. */
++    private boolean idle;
+     protected final ContainerData dataAccess = new ContainerData() {
+         @Override
+         public int get(final int dataId) {
+@@ -147,6 +_,7 @@
+ 
+     public static void serverTick(final ServerLevel level, final BlockPos pos, BlockState state, final AbstractFurnaceBlockEntity entity) {
+         boolean changed = false;
++        boolean retryFuel = false;
+         boolean isLit;
+         boolean wasLit;
+         if (entity.litTimeRemaining > 0) {
+@@ -186,6 +_,9 @@
+                                 consumeFuel(level, pos, entity.items, fuel);
+                                 isLit = true;
+                                 changed = true;
++                            } else {
++                                // Burn times can be rolled from a loot context; retry next tick.
++                                retryFuel = true;
+                             }
+                         }
+ 
+@@ -221,6 +_,18 @@
+         if (changed) {
+             setChanged(level, pos, state);
+         }
++
++        // Unlit with no cooking progress, nothing changes until the inventory, block state or
++        // recipes do, and each of those wakes the furnace.
++        boolean idle = !isLit && entity.cookingTimer == 0 && !changed && !retryFuel;
++        if (entity.idle != idle) {
++            entity.idle = idle;
++        }
++    }
++
++    @Override
++    public boolean isIdle() {
++        return this.idle;
+     }
+ 
+     private static void consumeFuel(final ServerLevel level, final BlockPos pos, final NonNullList<ItemStack> items, final ItemStack fuel) {
+@@ -326,6 +_,7 @@
+ 
+     @Override
+     public void setItem(final int slot, final ItemStack itemStack) {
++        this.wakeUp();
+         ItemStack oldStack = this.items.get(slot);
+         boolean same = !itemStack.isEmpty() && ItemStack.isSameItemSameComponents(oldStack, itemStack);
+         this.items.set(slot, itemStack);

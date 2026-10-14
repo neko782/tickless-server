@@ -325,6 +325,18 @@
          this.tickersInLevel.values().forEach(ticker -> ticker.rebind(NULL_TICKER));
          this.tickersInLevel.clear();
      }
+@@ -733,6 +_,11 @@
+         }
+ 
+         @Override
++        public BlockEntity sleeper() {
++            return this.blockEntity;
++        }
++
++        @Override
+         public void tick() {
+             if (!this.blockEntity.isRemoved() && this.blockEntity.hasLevel()) {
+                 BlockPos pos = this.blockEntity.getBlockPos();
 @@ -799,7 +_,7 @@
      }
  
@@ -334,3 +346,15 @@
  
          private RebindableTickingBlockEntityWrapper(final TickingBlockEntity ticker) {
              this.ticker = ticker;
+@@ -807,6 +_,11 @@
+ 
+         private void rebind(final TickingBlockEntity ticker) {
+             this.ticker = ticker;
++        }
++
++        @Override
++        public @Nullable BlockEntity sleeper() {
++            return this.ticker.sleeper();
+         }
+ 
+         @Override

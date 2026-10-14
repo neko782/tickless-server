@@ -16,6 +16,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.ticks.LevelChunkTicks;
@@ -46,6 +47,8 @@ public final class LevelEventScheduler {
     private static final int STREAM_RUNNING_REQUESTED = 3;
     private static final int ENTITY_BATCH = 16;
     private static final int BLOCK_ENTITY_BATCH = 8;
+    /** Whether idle block entities stop ticking until woken; see {@link BlockEntity#isIdle()}. */
+    private static final boolean SLEEPING_BLOCK_ENTITIES = Boolean.parseBoolean(System.getProperty("tickless.sleepingBlockEntities", "true"));
     /** Block entities fired in the current wheel slot; only the wheel's driver thread touches it. */
     private final List<BlockEntityTimer> blockEntityBatch = new java.util.ArrayList<>();
     private final ServerLevel level;
@@ -77,6 +80,8 @@ public final class LevelEventScheduler {
     public final LongAdder completedEntitySteps = new LongAdder();
     public final LongAdder skippedChunkSteps = new LongAdder();
     public final LongAdder skippedEntitySteps = new LongAdder();
+    /** Block entity steps skipped because the block entity was asleep. */
+    public final LongAdder sleepingBlockEntitySteps = new LongAdder();
 
     public LevelEventScheduler(final ServerLevel level, final WorldWorkers workers) {
         this.level = level;
@@ -451,11 +456,22 @@ public final class LevelEventScheduler {
         }
     }
 
+    /** Whether the timer's block entity went idle and nothing has woken it since. */
+    private boolean asleep(final BlockEntityTimer timer) {
+        Sleep sleep = timer.sleep;
+        if (sleep != null && sleep.blockEntity.wakeups() == sleep.wakeups && timer.ticker.sleeper() == sleep.blockEntity) {
+            this.sleepingBlockEntitySteps.increment();
+            return true;
+        }
+
+        return false;
+    }
+
     /** Runs on the wheel's driver thread. */
     private void fireBlockEntity(final BlockEntityTimer timer) {
         if (this.timersStarted && this.tickingChunks.containsKey(timer.chunkKey)
             && !timer.ticker.isRemoved() && this.level.tickRateManager().runsNormally()
-            && this.level.shouldTickBlocksAt(timer.chunkKey) && timer.queued.compareAndSet(false, true)) {
+            && this.level.shouldTickBlocksAt(timer.chunkKey) && !this.asleep(timer) && timer.queued.compareAndSet(false, true)) {
             this.blockEntityBatch.add(timer);
             if (this.blockEntityBatch.size() >= BLOCK_ENTITY_BATCH) {
                 this.flushBlockEntityBatch();
@@ -480,12 +496,20 @@ public final class LevelEventScheduler {
             this.workers.execute(() -> {
                 for (BlockEntityTimer timer : batch) {
                     try {
-                        this.runBlockEvent(timer.pos, () -> {
+                        // Read before the tick takes the block's lock: a change that wakes the
+                        // block entity after this read keeps it awake.
+                        BlockEntity sleeper = SLEEPING_BLOCK_ENTITIES ? timer.ticker.sleeper() : null;
+                        long wakeups = sleeper == null ? 0L : sleeper.wakeups();
+                        boolean committed = this.workers.tryRunEvent(timer.pos.getX(), timer.pos.getY(), timer.pos.getZ(), true, () -> {
+                            this.level.worldLocks().lockBlock(timer.pos);
                             // A task can have waited at the exclusive gate while its chunk unloaded.
                             if (timer.active && !timer.ticker.isRemoved()) {
                                 timer.ticker.tick();
                             }
                         }, timer.ticker);
+                        if (committed && sleeper != null && sleeper.isIdle()) {
+                            timer.sleep = new Sleep(sleeper, wakeups);
+                        }
                     } finally {
                         timer.queued.set(false);
                     }
@@ -764,6 +788,8 @@ public final class LevelEventScheduler {
         private final TickingBlockEntity ticker;
         private final long chunkKey;
         private final AtomicBoolean queued = new AtomicBoolean();
+        /** The last idle tick, written by the worker that ran it before it clears {@link #queued}. */
+        private volatile @org.jspecify.annotations.Nullable Sleep sleep;
 
         private BlockEntityTimer(final BlockPos pos, final TickingBlockEntity ticker, final long chunkKey) {
             this.pos = pos;
@@ -781,6 +807,10 @@ public final class LevelEventScheduler {
         public String toString() {
             return "block entity at " + this.pos;
         }
+    }
+
+    /** A block entity that was idle after a tick, and its wake count read before that tick. */
+    private record Sleep(BlockEntity blockEntity, long wakeups) {
     }
 
     private static final class ScheduledChunkTimer extends TimerHandle {

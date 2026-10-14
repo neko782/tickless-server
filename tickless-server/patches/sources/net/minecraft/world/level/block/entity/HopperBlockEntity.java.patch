@@ -28,3 +28,16 @@
      }
  
      private static boolean canMergeItems(final ItemStack a, final ItemStack b) {
+@@ -417,6 +_,12 @@
+     @Override
+     public boolean isGridAligned() {
+         return true;
++    }
++
++    /** A locked hopper off cooldown does nothing until its block state changes, which wakes it. */
++    @Override
++    public boolean isIdle() {
++        return this.cooldownTime <= 0 && !this.getBlockState().getValue(HopperBlock.ENABLED);
+     }
+ 
+     private void setCooldown(final int time) {

@@ -1,6 +1,77 @@
 --- a/net/minecraft/world/level/block/entity/BlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/BlockEntity.java
-@@ -226,6 +_,8 @@
+@@ -47,6 +_,19 @@
+     protected boolean remove;
+     private BlockState blockState;
+     private DataComponentMap components = DataComponentMap.EMPTY;
++    private static final java.lang.invoke.VarHandle WAKEUPS;
++    /** Bumped by {@link #wakeUp()} whenever a sleeping ticker might have work again. */
++    private static volatile long globalWakeups;
++    @net.minecraft.world.level.parallel.Unowned
++    private volatile long wakeups;
++
++    static {
++        try {
++            WAKEUPS = java.lang.invoke.MethodHandles.lookup().findVarHandle(BlockEntity.class, "wakeups", long.class);
++        } catch (ReflectiveOperationException e) {
++            throw new ExceptionInInitializerError(e);
++        }
++    }
+ 
+     public BlockEntity(final BlockEntityType<?> type, final BlockPos worldPosition, final BlockState blockState) {
+         this.type = type;
+@@ -96,11 +_,13 @@
+     }
+ 
+     public final void loadWithComponents(final ValueInput input) {
++        this.wakeUp();
+         this.loadAdditional(input);
+         this.components = input.read("components", DataComponentMap.CODEC).orElse(DataComponentMap.EMPTY);
+     }
+ 
+     public final void loadCustomOnly(final ValueInput input) {
++        this.wakeUp();
+         this.loadAdditional(input);
+     }
+ 
+@@ -190,6 +_,7 @@
+     }
+ 
+     public void setChanged() {
++        this.wakeUp();
+         if (this.level != null) {
+             setChanged(this.level, this.worldPosition, this.blockState);
+         }
+@@ -222,10 +_,37 @@
+         return this.remove;
+     }
+ 
++    /**
++     * Whether the last server tick left nothing to do until something changes this block entity.
++     * A sleeping ticker is skipped until {@link #wakeUp()}; every change that can give it work
++     * again must wake it: its inventory ({@link #setChanged()}, {@code setItem}), its block state,
++     * loaded data and components.
++     */
++    public boolean isIdle() {
++        return false;
++    }
++
++    /** Ends any sleep of this block entity's ticker. Safe from any thread. */
++    public final void wakeUp() {
++        WAKEUPS.getAndAdd(this, 1L);
++    }
++
++    /** Ends every sleep, for changes such as a datapack reload that can give any ticker work. */
++    public static void wakeUpAll() {
++        globalWakeups++;
++    }
++
++    /** Changes whenever this block entity is woken; a sleep lasts while it stays the same. */
++    public final long wakeups() {
++        return this.wakeups + globalWakeups;
++    }
++
+     public void setRemoved() {
          this.remove = true;
      }
  
@@ -9,3 +80,19 @@
      public void clearRemoved() {
          this.remove = false;
      }
+@@ -268,6 +_,7 @@
+     public void setBlockState(final BlockState blockState) {
+         this.validateBlockState(blockState);
+         this.blockState = blockState;
++        this.wakeUp();
+     }
+ 
+     protected void applyImplicitComponents(final DataComponentGetter components) {
+@@ -278,6 +_,7 @@
+     }
+ 
+     public final void applyComponents(final DataComponentMap prototype, final DataComponentPatch patch) {
++        this.wakeUp();
+         final Set<DataComponentType<?>> implicitComponents = new HashSet<>();
+         implicitComponents.add(DataComponents.BLOCK_ENTITY_DATA);
+         implicitComponents.add(DataComponents.BLOCK_STATE);

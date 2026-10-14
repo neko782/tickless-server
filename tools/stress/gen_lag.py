@@ -7,6 +7,8 @@
   redstone  a redstone dust field over a floor of redstone lamps, toggled by clocks
             (neighbour update storms and light updates)
   furnaces  thousands of furnaces smelting
+  idle      thousands of furnaces that cannot smelt (no fuel, no input or a full output) and
+            locked hoppers holding items; checks that each kind wakes when its blocker goes
 
 The timed window is marked with "say BENCH_START" / "say BENCH_END", each followed by
 "time query gametime", so vanilla and tickless runs can be compared. Named checks
@@ -22,6 +24,8 @@ out = sys.argv[1]
 run_seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 scale = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 zones = set(sys.argv[4:]) or {"fluids", "items", "carts", "redstone", "furnaces"}
+if "all" in zones:
+    zones = {"fluids", "items", "carts", "redstone", "furnaces", "idle"}
 Y = 200
 lines = []
 cmd = lines.append
@@ -119,6 +123,31 @@ if "furnaces" in zones:
                 )
                 furnaces += 1
 
+idle = 0
+wake = {}
+if "idle" in zones:
+    # South-east quadrant above the smelting furnaces: block entities that tick every step on
+    # vanilla but have nothing to do. Each hopper is locked by the redstone block east of it, which
+    # powers no other hopper (the grid is two blocks wide).
+    target = int(4000 * scale)
+    raw = '{Slot:0b,id:"minecraft:raw_iron",count:64}'
+    coal = '{Slot:1b,id:"minecraft:coal",count:64}'
+    full = '{Slot:2b,id:"minecraft:stone",count:64}'
+    furnace_items = {"input": [raw], "fuel": [coal], "blocked": [raw, coal, full]}
+    for y in range(Y + 8, Y + 40):
+        for x in range(1, 95, 2):
+            for z in range(1, 95, 2):
+                if idle >= target:
+                    break
+                kind = ("input", "fuel", "blocked", "hopper")[idle % 4]
+                wake.setdefault(kind, (x, y, z))
+                if kind == "hopper":
+                    cmd(f"setblock {x + 1} {y} {z} minecraft:redstone_block")
+                    cmd(f'setblock {x} {y} {z} minecraft:hopper[enabled=false]{{Items:[{{Slot:0b,id:"minecraft:stone",count:5}}]}}')
+                else:
+                    cmd(f"setblock {x} {y} {z} minecraft:furnace{{Items:[{','.join(furnace_items[kind])}]}}")
+                idle += 1
+
 cmd("sleep 5")
 cmd("say BENCH_START")
 cmd("time query gametime")
@@ -136,6 +165,29 @@ if "carts" in zones:
     cmd("execute store result score #carts lag if entity @e[type=minecraft:minecart]")
     cmd("say check carts-kept")
     cmd(f"execute if score #carts lag matches {piles * carts_per_pile}")
+if "idle" in zones:
+    # Every idle block entity has been asleep for the whole window; give each kind work.
+    x, y, z = wake["input"]
+    cmd(f"item replace block {x} {y} {z} container.1 with minecraft:coal 64")
+    x, y, z = wake["fuel"]
+    cmd(f"item replace block {x} {y} {z} container.0 with minecraft:raw_iron 64")
+    x, y, z = wake["blocked"]
+    cmd(f"item replace block {x} {y} {z} container.2 with minecraft:air")
+    x, y, z = wake["hopper"]
+    cmd(f"setblock {x} {y - 1} {z} minecraft:chest")
+    cmd(f"setblock {x + 1} {y} {z} minecraft:air")
+    cmd("sleep 3")
+    for kind in ("input", "fuel", "blocked"):
+        x, y, z = wake[kind]
+        cmd(f"say check idle-furnace-{kind}-woke")
+        cmd(f"execute if block {x} {y} {z} minecraft:furnace[lit=true]")
+    x, y, z = wake["hopper"]
+    cmd("say check idle-hopper-woke")
+    cmd(f"execute if items block {x} {y - 1} {z} container.0 minecraft:stone")
+    # A furnace that was never woken is still unlit.
+    x, y, z = wake["blocked"]
+    cmd("say check idle-furnace-stays-idle")
+    cmd(f"execute if block {x} {y} {z + 8} minecraft:furnace[lit=false]")
 if "fluids" in zones:
     cmd("say check water-flowing")
     cmd(f"execute if block -89 {Y} -94 minecraft:water")
@@ -144,4 +196,5 @@ with open(out, "w") as f:
     f.write("\n".join(lines) + "\n")
 
 print(f"{len(lines)} commands: {gates} fluid gates, {items if 'items' in zones else 0} items, "
-      f"{piles} cart piles of {carts_per_pile}, {clocks} redstone clocks, {furnaces} furnaces")
+      f"{piles} cart piles of {carts_per_pile}, {clocks} redstone clocks, {furnaces} furnaces, "
+      f"{idle} idle block entities")

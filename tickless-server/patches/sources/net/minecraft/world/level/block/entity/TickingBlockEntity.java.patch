@@ -1,0 +1,12 @@
+--- a/net/minecraft/world/level/block/entity/TickingBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/TickingBlockEntity.java
+@@ -10,4 +_,9 @@
+     BlockPos getPos();
+ 
+     String getType();
++
++    /** The block entity whose {@link BlockEntity#isIdle()} lets this ticker sleep, if any. */
++    default @org.jspecify.annotations.Nullable BlockEntity sleeper() {
++        return null;
++    }
+ }

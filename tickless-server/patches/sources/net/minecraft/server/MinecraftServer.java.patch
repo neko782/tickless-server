@@ -100,7 +100,7 @@
          this.registries = worldStem.registries();
          if (!this.registries.compositeAccess().lookupOrThrow(Registries.LEVEL_STEM).containsKey(LevelStem.OVERWORLD)) {
              throw new IllegalStateException("Missing Overworld dimension data");
-@@ -623,7 +_,104 @@
+@@ -623,7 +_,107 @@
          this.stopServer();
      }
  
@@ -124,6 +124,7 @@
 +        long entityRequests = 0L;
 +        long skippedEntitySteps = 0L;
 +        long completedEntitySteps = 0L;
++        long sleepingBlockEntitySteps = 0L;
 +        int entities = 0;
 +        int loadedChunks = 0;
 +
@@ -136,6 +137,7 @@
 +            skippedEntitySteps += scheduler.skippedEntitySteps.sum();
 +            entities += scheduler.tickingEntityCount();
 +            completedEntitySteps += scheduler.completedEntitySteps.sum();
++            sleepingBlockEntitySteps += scheduler.sleepingBlockEntitySteps.sum();
 +        }
 +
 +        // This runs on the server thread, so its CPU time is the current thread's.
@@ -147,7 +149,7 @@
 +        double chunkRate = chunkDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedChunkSteps - this.lastSkippedChunkSteps) / chunkDelta);
 +        double entityRate = entityDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedEntitySteps - this.lastSkippedEntitySteps) / entityDelta);
 +        LOGGER.info(
-+            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}",
++            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}, sleeping block entity steps {}",
 +            String.format(java.util.Locale.ROOT, "%.0f", (events - this.lastStatsEvents) / seconds),
 +            String.format(java.util.Locale.ROOT, "%.2f", chunkRate),
 +            String.format(java.util.Locale.ROOT, "%.2f", entityRate),
@@ -158,7 +160,8 @@
 +            WorldTxn.ABORTS.sum(),
 +            WorldTxn.WOUNDS.sum(),
 +            this.worldWorkers.failures.sum(),
-+            completedEntitySteps
++            completedEntitySteps,
++            sleepingBlockEntitySteps
 +        );
 +        this.lastStatsEvents = events;
 +        this.lastStatsSimulationSteps = this.tickCount;
@@ -821,7 +824,7 @@
      }
  
      public abstract boolean isPublished();
-@@ -1535,24 +_,42 @@
+@@ -1535,24 +_,44 @@
                          .thenApply(managers -> new MinecraftServer.ReloadableResources(resources, managers));
                  }
              )
@@ -870,6 +873,8 @@
 +        this.worldData.setDataConfiguration(newConfig);
 +        this.resources.managers.updateComponentsAndStaticRegistryTags();
 +        this.resources.managers.getRecipeManager().finalizeRecipeLoading(this.worldData.enabledFeatures());
++        // New recipes, fuels and loot can give sleeping block entities work.
++        net.minecraft.world.level.block.entity.BlockEntity.wakeUpAll();
 +        this.getPlayerList().saveAll();
 +        this.getPlayerList().reloadResources();
 +        this.functionManager.replaceLibrary(this.resources.managers.getFunctionLibrary());

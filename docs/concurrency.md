@@ -66,6 +66,37 @@ benchmark below, together with the light batching). A shared queue emptied by a 
 drainer threads was tried as well: it saved as much at light load but collapsed under lock
 contention, when drainers blocked on world locks held back runnable events queued behind them.
 
+### Sleeping block entities
+
+A block entity with nothing to do stops ticking until something gives it work, as in Lithium.
+Two kinds sleep so far (`BlockEntity.isIdle`):
+
+- furnaces, blast furnaces and smokers that are unlit with no cooking progress: no fuel, no
+  input, input without a recipe, or a full output slot;
+- hoppers locked by redstone, once their cooldown has run out.
+
+Every change that can give such a block entity work calls `BlockEntity.wakeUp`, which bumps a
+counter: `setChanged` (every container change, including hopper transfers and menu clicks),
+`setItem`, `removeItemNoUpdate`, `clearContent`, a new block state, loaded data and applied
+components. A datapack reload wakes every block entity, since recipes and fuels can change.
+After a tick commits, the scheduler checks `isIdle` and stores the counter as it was *before*
+the tick took the block's lock. While that stored value matches, the phase wheel skips the
+timer without queuing any work. A change made while the tick ran therefore keeps the block
+entity awake, and a wake that rolls back with its transaction only costs one extra tick. A
+sleeping timer stays in its wheel slot, so waking it needs no reinsertion.
+
+What a sleep skips is invisible: an idle furnace's tick changes nothing, and a locked
+hopper's tick only lowers a cooldown that is already spent. The exception is the hopper's
+`tickedGameTime`, which stops advancing while it sleeps, so a hopper filling a sleeping one can
+choose a cooldown of 8 instead of 7. Same-tick order is already not deterministic here (see
+above). Furnace fuel whose burn time comes out as 0 is retried every tick, as on vanilla,
+because burn times can be rolled from a loot context.
+
+With 16,000 idle block entities (`gen_lag.py ... idle`), world events dropped from 321,000/s to
+1,100/s and server CPU from 57% to 14% of a core; see [benchmarks](benchmarks.md#sleeping-block-entities).
+`-Dtickless.sleepingBlockEntities=false` turns this off. Fabric mods that give furnaces or
+hoppers new behaviour while idle need it off, or must call `wakeUp`.
+
 ## Locks
 
 `WorldTxn` is one event's transaction. Locks are taken when world state is used
