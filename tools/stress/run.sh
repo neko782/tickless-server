@@ -16,6 +16,7 @@
 # skips terrain generation.
 # SERVER_INSTALL selects another installed server, relative to the repository.
 # STRESS_GC selects zgc (default) or g1; STRESS_JAVA_OPTS adds explicit test JVM options.
+# STRESS_HEAP selects the maximum server heap (default 6g).
 # STRESS_IMAGE selects the Java Docker image (default eclipse-temurin:27-jdk).
 set -eu
 
@@ -31,6 +32,10 @@ esac
 dir=build/stress-$name
 rm -rf "$dir"
 mkdir -p "$dir"
+if [ -n "${STRESS_MODS:-}" ]; then
+  mkdir -p "$dir/mods"
+  cp "$STRESS_MODS"/*.jar "$dir/mods/"
+fi
 echo eula=true > "$dir/eula.txt"
 cat > "$dir/server.properties" <<PROPS
 online-mode=false
@@ -58,11 +63,26 @@ fi
 
 docker run --rm -i --name "tickless-$name" \
   --user "$(id -u):$(id -g)" \
-  -e JAVA_OPTS="-Xmx6g $gc_opts -Dtickless.statsIntervalSeconds=5 $java_opts" \
+  -e JAVA_OPTS="-Xmx${STRESS_HEAP:-6g} $gc_opts -Dtickless.statsIntervalSeconds=5 $java_opts" \
   -v "$PWD:/workspace" -w "/workspace/$dir" \
   "${STRESS_IMAGE:-eclipse-temurin:27-jdk}" \
   "/workspace/${SERVER_INSTALL:-build/install/minecraft-server}/bin/minecraft-server" --nogui < "$dir/in" > "$dir/out.log" 2>&1 &
 server=$!
+# A failed directive or external timeout must not leave a server consuming memory.
+watchdog=
+sampler=
+cleanup() {
+  status=$?
+  trap - 0 HUP INT TERM
+  docker kill "tickless-$name" > /dev/null 2>&1 || true
+  [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null || true
+  [ -z "$sampler" ] || kill "$sampler" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  exit "$status"
+}
+trap cleanup 0
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
 
 dump_and_kill() {
   echo "$1" >&2

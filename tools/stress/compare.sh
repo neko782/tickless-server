@@ -4,7 +4,8 @@
 #
 # usage: tools/stress/compare.sh <label> <mobs> [warmup-seconds] [window-seconds] [server...]
 # Servers are install names: tickless (build/install/minecraft-server), vanilla, paper and
-# paper-noear (set up by setup_vanilla.sh and setup_paper.sh). Default: all four.
+# paper-noear (set up by setup_vanilla.sh and setup_paper.sh), plain and fabric.
+# Default: vanilla, paper, paper-noear and tickless.
 set -eu
 
 cd "$(dirname "$0")/../.."
@@ -28,6 +29,7 @@ open(dst, "w").write(s.replace(f"sleep {window}\n", marked, 1))
 PY
 
 logs=
+failed=0
 for server in $servers; do
   case "$server" in
     tickless) install=build/install/minecraft-server ;;
@@ -35,8 +37,18 @@ for server in $servers; do
   esac
   name=cmp-$label-$server
   echo "== $server"
-  SERVER_INSTALL=$install TIMEOUT=${TIMEOUT:-1500} tools/stress/run.sh "$name" "$script" || echo "run failed: $server"
-  python3 tools/stress/check.py "build/stress-$name/out.log" 135424 | tail -1
+  if ! SERVER_INSTALL=$install TIMEOUT=${TIMEOUT:-600} tools/stress/run.sh "$name" "$script"; then
+    echo "run failed: $server"
+    failed=1
+  fi
+  if python3 tools/stress/check.py "build/stress-$name/out.log" 135424 > "build/stress-$name/check.txt"; then
+    tail -1 "build/stress-$name/check.txt"
+  else
+    cat "build/stress-$name/check.txt"
+    failed=1
+  fi
   logs="$logs build/stress-$name/out.log"
 done
 python3 tools/stress/bench_compare.py $logs
+
+exit "$failed"

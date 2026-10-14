@@ -18,7 +18,12 @@ done
 if [ "${BUILD:-1}" = 1 ]; then
   ./build.sh installDist "-PinstallTo=$install"
 fi
+check_java_opts=
+if [ -f "$install/agent/tickless-fabric-agent.jar" ]; then
+  check_java_opts="-javaagent:/workspace/$install/agent/tickless-fabric-agent.jar -Dtickless.fabric.checks=true"
+fi
 exec docker run --rm --user "$(id -u):$(id -g)" \
+  -e CHECK_JAVA_OPTS="$check_java_opts" \
   -e CHECK_TIMEOUT="${CHECK_TIMEOUT:-150}" \
   -v "$PWD:/workspace" -w /workspace \
   eclipse-temurin:27-jdk sh -eu -c '
@@ -38,7 +43,7 @@ exec docker run --rm --user "$(id -u):$(id -g)" \
       source=/workspace/tools/$check.java
       package=$(sed -n "s/^package \([^;]*\);/\1/p" "$source")
       main=${package:+$package.}$check
-      if timeout "$CHECK_TIMEOUT" java -Xmx2g -XX:+UseG1GC \
+      if timeout "$CHECK_TIMEOUT" java ${CHECK_JAVA_OPTS:-} -Xmx2g -XX:+UseG1GC \
           -cp ".:/workspace/$install/lib/*" "$main" > "$check.log" 2>&1; then
         echo "PASS $check"
       else

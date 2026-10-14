@@ -251,7 +251,7 @@ def main():
         parser.error('Safe label and positive duration, rounds, workers and timeout required')
     install = Path(args.install).resolve()
     install.relative_to(ROOT)
-    jars = [*install.glob('lib/tickless-server*.jar'), *install.glob('lib/minecraft-server-*.jar')]
+    jars = [*install.glob('lib/tickless-server*.jar'), *install.glob('lib/minecraft-server-*.jar'), *install.glob('lib/tickless-fabric-game.jar')]
     if len(jars) != 1:
         parser.error('Install must contain exactly one packaged server jar')
     output = ROOT / 'build/soundness' / args.label

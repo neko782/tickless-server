@@ -1,0 +1,13 @@
+#!/bin/sh
+# Run from the directory containing eula.txt, server.properties, world/ and mods/.
+set -eu
+fabric_install=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -n "${JAVA_HOME:-}" ]; then
+  fabric_java="$JAVA_HOME/bin/java"
+else
+  fabric_java=java
+fi
+exec "$fabric_java" ${JAVA_OPTS:-} \
+  "-javaagent:$fabric_install/agent/tickless-fabric-agent.jar" \
+  "-Dfabric.gameJarPath=$fabric_install/lib/tickless-fabric-game.jar" \
+  -cp "$fabric_install/lib/*" net.fabricmc.loader.impl.launch.knot.KnotServer "$@"

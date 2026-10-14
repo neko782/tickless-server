@@ -6,6 +6,10 @@ plugins {
 
 repositories {
     mavenCentral()
+    exclusiveContent {
+        forRepository { maven("https://maven.fabricmc.net/") }
+        filter { includeGroup("net.fabricmc") }
+    }
     maven("https://repo.papermc.io/repository/maven-public/")
 }
 
@@ -51,6 +55,41 @@ application {
 val buildtools = sourceSets.create("buildtools")
 val launcher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
 
+val fabricLibraries = configurations.create("fabricLibraries")
+dependencies {
+    fabricLibraries("net.fabricmc:fabric-loader:0.19.5")
+    fabricLibraries("net.fabricmc:sponge-mixin:0.17.4+mixin.0.8.7")
+    listOf("asm", "asm-analysis", "asm-commons", "asm-tree", "asm-util").forEach {
+        fabricLibraries("org.ow2.asm:$it:9.10.1")
+    }
+}
+
+// Knot must see the original patched bytecode. Ownership is applied by the agent after
+// Mixin, including injected methods and mod-defined entities, immediately before defineClass.
+val fabricGameJar = tasks.register<Jar>("fabricGameJar") {
+    archiveFileName = "tickless-fabric-game.jar"
+    from(sourceSets.main.get().output)
+    exclude("META-INF/*.SF", "META-INF/*.RSA", "META-INF/*.DSA")
+    manifest { attributes("Main-Class" to application.mainClass.get()) }
+}
+val fabricAgentJar = tasks.register<Jar>("fabricAgentJar") {
+    archiveFileName = "tickless-fabric-agent.jar"
+    from(buildtools.output)
+    manifest { attributes("Premain-Class" to "FabricOwnershipAgent") }
+}
+tasks.register<Sync>("installFabric") {
+    dependsOn(fabricGameJar, fabricAgentJar)
+    into(rootProject.layout.buildDirectory.dir("install/fabric"))
+    from(fabricGameJar) { into("lib") }
+    from(fabricAgentJar) { into("agent") }
+    from(sourceSets.main.get().runtimeClasspath.filter { it.name.endsWith(".jar") }) { into("lib") }
+    from(fabricLibraries) { into("lib") }
+    from(rootProject.file("tools/fabric/minecraft-server")) {
+        into("bin")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+}
+
 tasks.jar {
     manifest {
         attributes("Main-Class" to application.mainClass.get())
@@ -86,4 +125,32 @@ tasks.installDist {
 
 tasks.build {
     dependsOn(tasks.installDist)
+}
+
+val downloadFabricTestMods = tasks.register<Exec>("downloadFabricTestMods") {
+    workingDir(rootProject.projectDir)
+    commandLine("python3", "tools/fabric/download-test-mods.py")
+}
+tasks.register<Exec>("buildFabricProbe") {
+    dependsOn("installFabric", downloadFabricTestMods)
+    workingDir(rootProject.projectDir)
+    environment("JAVA_HOME", launcher.get().metadata.installationPath.asFile.absolutePath)
+    commandLine("python3", "tools/fabric/build-probe.py")
+}
+
+val fabricProtectedClasses = tasks.register("fabricProtectedClasses") {
+    mustRunAfter("rebuildSourcePatches")
+    val patches = fileTree("patches/sources") { include("**/*.java.patch") }
+    val manifest = layout.buildDirectory.file("fabric-conflicts/tickless-patched-classes.txt")
+    inputs.files(patches)
+    outputs.file(manifest)
+    doLast {
+        val directory = project.file("patches/sources")
+        val names = patches.files.map { it.relativeTo(directory).invariantSeparatorsPath.removeSuffix(".java.patch") }.sorted()
+        manifest.get().asFile.apply { parentFile.mkdirs(); writeText(names.joinToString("\n", postfix = "\n")) }
+    }
+}
+tasks.processResources {
+    dependsOn(fabricProtectedClasses)
+    from(layout.buildDirectory.file("fabric-conflicts/tickless-patched-classes.txt"))
 }

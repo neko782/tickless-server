@@ -1,13 +1,5 @@
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -38,7 +_,6 @@
- import java.util.concurrent.RejectedExecutionException;
- import java.util.concurrent.atomic.AtomicReference;
- import java.util.concurrent.locks.LockSupport;
--import java.util.function.BooleanSupplier;
- import java.util.function.Consumer;
- import java.util.function.Function;
- import java.util.function.Supplier;
 @@ -171,6 +_,9 @@
  import net.minecraft.world.level.levelgen.WorldOptions;
  import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
@@ -39,8 +31,13 @@
      public static final int ABSOLUTE_MAX_WORLD_SIZE = 29999984;
      public static final LevelSettings DEMO_SETTINGS = new LevelSettings(
          "Demo World", GameType.SURVIVAL, LevelSettings.DifficultySettings.DEFAULT, false, WorldDataConfiguration.DEFAULT
-@@ -235,8 +_,8 @@
-     private PlayerList playerList;
+@@ -232,11 +_,12 @@
+     private int port = -1;
+     private final LayeredRegistryAccess<RegistryLayer> registries;
+     private final Map<ResourceKey<Level>, ServerLevel> levels = Maps.newLinkedHashMap();
+-    private PlayerList playerList;
++    private volatile PlayerList playerList;
++    private final java.util.concurrent.CompletableFuture<PlayerList> playerListReady = new java.util.concurrent.CompletableFuture<>();
      private volatile boolean running = true;
      private boolean stopped;
 -    private int tickCount;
@@ -76,11 +73,14 @@
      private final PackRepository packRepository;
      private final WorldGenSettings worldGenSettings;
      private final ServerScoreboard scoreboard = new ServerScoreboard(this);
-@@ -281,11 +_,14 @@
+@@ -281,11 +_,18 @@
      private final ServerDebugSubscribers debugSubscribers = new ServerDebugSubscribers(this);
      protected final WorldData worldData;
      private LevelData.RespawnData effectiveRespawnData = LevelData.RespawnData.DEFAULT;
--    private int emptyTicks;
++    // Vanilla-compatible keep-alive counter used by pregeneration mods such as Chunky.
++    private long lastConnectionNetworkSlot = Long.MIN_VALUE;
+     private int emptyTicks;
++    private int expectedEmptyTicks;
 +    private long emptySinceNanos = -1L;
 +    private boolean pausedForEmptyServer;
 +    private long lastTimeSyncNanos;
@@ -100,7 +100,7 @@
          this.registries = worldStem.registries();
          if (!this.registries.compositeAccess().lookupOrThrow(Registries.LEVEL_STEM).containsKey(LevelStem.OVERWORLD)) {
              throw new IllegalStateException("Missing Overworld dimension data");
-@@ -623,7 +_,103 @@
+@@ -623,7 +_,104 @@
          this.stopServer();
      }
  
@@ -193,6 +193,7 @@
 +    }
 +
      protected void stopServer() {
++        if (this.playerList == null) this.playerListReady.completeExceptionally(new IllegalStateException("Server stopped before player-list initialization"));
 +        if (WorldTxn.isEnabled()) {
 +            for (ServerLevel level : this.getAllLevels()) {
 +                level.eventScheduler().stopTimers();
@@ -248,7 +249,7 @@
          if (wait) {
              try {
                  this.serverThread.join();
-@@ -710,60 +_,63 @@
+@@ -710,60 +_,64 @@
              }
  
              this.nextTickTimeNanos = Util.getNanos();
@@ -342,6 +343,7 @@
 -
 -                this.isReady = true;
 -                JvmProfiler.INSTANCE.onServerTick(this.smoothedTickTimeMillis);
++                WorldTxn.throwIfFabricFailed();
 +                ReportedException maintenanceCrash = this.maintenanceCrash;
 +                if (maintenanceCrash != null) {
 +                    throw maintenanceCrash;
@@ -513,7 +515,7 @@
          LockSupport.parkNanos("waiting for tasks", waitNanos);
          if (shouldLogTime) {
              this.idleTimeNanos = this.idleTimeNanos + (Util.getNanos() - waitStart);
-@@ -872,14 +_,18 @@
+@@ -872,21 +_,29 @@
  
      @Override
      protected boolean shouldRun(final TickTask task) {
@@ -536,7 +538,7 @@
 +            return true;
 +        }
 +
-@@ -887,6 +_,10 @@
+         if (super.pollTask()) {
              return true;
          }
  
@@ -555,17 +557,19 @@
      }
  
      private Optional<ServerStatus.Favicon> loadStatusIcon() {
-@@ -946,40 +_,54 @@
+@@ -946,23 +_,38 @@
          return false;
      }
  
--    protected void tickServer(final BooleanSupplier haveTime) {
 +    public void wakeSimulation() {
 +        this.nextTickTimeNanos = Util.getNanos();
 +        this.scheduleSimulation();
 +    }
 +
-+    protected void tickServer() {
+     protected void tickServer(final BooleanSupplier haveTime) {
++        // Keep the vanilla connection call site for mod housekeeping. The service itself
++        // coalesces calls in the fixed network slot, including while simulation is sprinting.
++        this.tickConnection();
          long nano = Util.getNanos();
 -        int emptyTickThreshold = this.pauseWhenEmptySeconds() * 20;
 -        if (emptyTickThreshold > 0) {
@@ -573,12 +577,16 @@
 +        if (emptySeconds > 0) {
              if (this.playerList.getPlayerCount() == 0 && !this.tickRateManager.isSprinting()) {
 -                this.emptyTicks++;
++                if (this.emptyTicks < this.expectedEmptyTicks) this.emptySinceNanos = nano;
++                this.emptyTicks = Math.min(Integer.MAX_VALUE - 1, this.emptyTicks) + 1;
++                this.expectedEmptyTicks = this.emptyTicks;
 +                if (this.emptySinceNanos < 0L) {
 +                    this.emptySinceNanos = nano;
 +                }
              } else {
 -                this.emptyTicks = 0;
 +                this.emptySinceNanos = -1L;
++                this.emptyTicks = this.expectedEmptyTicks = 0;
 +                this.pausedForEmptyServer = false;
              }
  
@@ -596,15 +604,7 @@
                  return;
              }
          }
- 
-         this.tickCount++;
-         this.tickRateManager.tick();
--        this.tickChildren(haveTime);
-+        for (ServerLevel level : this.getAllLevels()) {
-+            level.advanceEnvironment();
-+        }
-         if (nano - this.lastServerStatus >= STATUS_EXPIRE_TIME_NANOS) {
-             this.lastServerStatus = nano;
+@@ -975,11 +_,15 @@
              this.status = this.buildServerStatus();
          }
  
@@ -622,11 +622,18 @@
          ProfilerFiller profiler = Profiler.get();
          profiler.push("tallying");
          long tickTime = Util.getNanos() - nano;
-@@ -992,24 +_,52 @@
+@@ -992,24 +_,59 @@
          profiler.pop();
      }
  
 -    protected void processPacketsAndTick(final boolean sprinting) {
++    /** Global clock callbacks; entity, chunk and block timers remain independent. */
++    protected void tickChildren(final BooleanSupplier haveTime) {
++        for (ServerLevel level : this.getAllLevels()) {
++            level.advanceEnvironment();
++        }
++    }
++
 +    private void processSimulation() {
          ProfilerFiller profiler = Profiler.get();
 -        profiler.push("tick");
@@ -636,7 +643,7 @@
 -        this.packetProcessor.processQueuedPackets();
 -        profiler.pop();
 -        this.tickServer(sprinting ? () -> false : this::haveTime);
-+        this.tickServer();
++        this.tickServer(this::haveTime);
 +        WorldTxn.mainSafePoint();
          this.tickFrame.end();
          profiler.pop();
@@ -782,6 +789,38 @@
      private void updateEffectiveRespawnData() {
          LevelData.RespawnData respawnData = this.worldData.overworldData().getRespawnData();
          ServerLevel respawnLevel = this.findRespawnDimension();
+@@ -1147,6 +_,10 @@
+     }
+ 
+     protected void tickConnection() {
++        if (this.networkLoopActive) {
++            if (this.lastConnectionNetworkSlot == this.nextNetworkTimeNanos) return;
++            this.lastConnectionNetworkSlot = this.nextNetworkTimeNanos;
++        }
+         this.getConnection().tick();
+     }
+ 
+@@ -1372,11 +_,19 @@
+     }
+ 
+     public PlayerList getPlayerList() {
+-        return this.playerList;
++        PlayerList players = this.playerList;
++        // SERVER_STARTING runs before initServer. Background mod monitors can already
++        // poll here; wait for publication without blocking the initializing server thread.
++        if (players == null && Boolean.getBoolean("tickless.fabric")
++            && Thread.currentThread() != this.serverThread && this.serverThread.isAlive()) {
++            return this.playerListReady.join();
++        }
++        return players;
+     }
+ 
+     public void setPlayerList(final PlayerList players) {
+         this.playerList = players;
++        this.playerListReady.complete(players);
+     }
+ 
+     public abstract boolean isPublished();
 @@ -1535,24 +_,42 @@
                          .thenApply(managers -> new MinecraftServer.ReloadableResources(resources, managers));
                  }

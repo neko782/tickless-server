@@ -56,6 +56,8 @@ import java.util.zip.ZipOutputStream;
  * rollback uses to restore it.
  */
 public final class OwnershipTransform {
+    private ClassLoader resourceLoader;
+    private int siteBase;
     private static final String ENTITY = "net/minecraft/world/entity/Entity";
     private static final String BLOCK_ENTITY = "net/minecraft/world/level/block/entity/BlockEntity";
     private static final String UNOWNED = "Lnet/minecraft/world/level/parallel/Unowned;";
@@ -122,6 +124,73 @@ public final class OwnershipTransform {
         new OwnershipTransform().run(jar, classpath);
     }
 
+    /** Transform final, post-Mixin class bytes without loading game classes. */
+    public byte[] transformRuntime(String name, byte[] bytes, ClassLoader loader, int base,
+            java.util.function.Consumer<List<String>> sink, boolean guardMod) {
+        this.resourceLoader = loader;
+        this.siteBase = base;
+        this.current = name;
+        ClassModel model = ClassFile.of().parse(bytes);
+        this.classes.put(name, model);
+        if (name.startsWith(SKIP_PACKAGE)) return null;
+        ClassFile writer = ClassFile.of(ClassFile.ClassHierarchyResolverOption.of(
+            ClassHierarchyResolver.ofResourceParsing(loader).cached()));
+        byte[] result = writer.transformClass(model, (cb, element) -> {
+            if (element instanceof MethodModel method && method.code().isPresent()) {
+                boolean sync = isSynchronized(method);
+                boolean guard = (guardMod || isForeignMixin(method)) && !parallelSafe(method) && !method.methodName().equalsString("<clinit>");
+                if (!guard && !this.needsRewrite(method)) { cb.with(element); return; }
+                Rewrite rewrite = new Rewrite(name, this.rewritesFields(method), sync ? method : null, model.thisClass().asSymbol());
+                rewrite.entryHook = this.entryHook(name, method);
+                rewrite.guard = guard;
+                rewrite.methodName = method.methodName().stringValue();
+                cb.transformMethod(method, (mb, me) -> {
+                    if (me instanceof AccessFlags flags && sync) mb.withFlags(flags.flagsMask() & ~ClassFile.ACC_SYNCHRONIZED);
+                    else if (me instanceof CodeModel code) mb.transformCode(code, rewrite);
+                    else mb.with(me);
+                });
+            } else cb.with(element);
+        });
+        sink.accept(List.copyOf(this.sites));
+        return result;
+    }
+
+    private boolean isForeignMixin(MethodModel method) {
+        var annotations = method.findAttribute(Attributes.runtimeVisibleAnnotations()).orElse(null);
+        if (annotations == null) return false;
+        for (var annotation : annotations.annotations()) {
+            if (annotation.className().equalsString("Lorg/spongepowered/asm/mixin/transformer/meta/MixinMerged;")) {
+                // Fabric's hooks are dispatchers; their listeners are guarded at the mod boundary.
+                for (var element : annotation.elements()) {
+                    if (element.name().equalsString("mixin") && element.value() instanceof java.lang.classfile.AnnotationValue.OfString value) {
+                        return !value.stringValue().startsWith("net.fabricmc.fabric.");
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean parallelSafe(MethodModel method) {
+        var annotations = method.findAttribute(Attributes.runtimeInvisibleAnnotations()).orElse(null);
+        return annotations != null && annotations.annotations().stream().anyMatch(a ->
+            a.className().equalsString("Lnet/minecraft/world/level/parallel/ParallelSafe;"));
+    }
+
+    private ClassModel classModel(String name) {
+        ClassModel found = this.classes.get(name);
+        if (found == null && this.resourceLoader != null) {
+            try (InputStream in = this.resourceLoader.getResourceAsStream(name + ".class")) {
+                if (in != null) {
+                    found = ClassFile.of().parse(in.readAllBytes());
+                    this.classes.put(name, found);
+                }
+            } catch (IOException e) { throw new IllegalStateException("Cannot inspect ownership of " + name, e); }
+        }
+        return found;
+    }
+
     private void run(final Path jar, final List<URL> classpath) throws IOException {
         Map<String, byte[]> entries = new LinkedHashMap<>();
         try (ZipFile zip = new ZipFile(jar.toFile())) {
@@ -153,7 +222,7 @@ public final class OwnershipTransform {
             }
 
             String name = entry.getKey().substring(0, entry.getKey().length() - ".class".length());
-            ClassModel model = this.classes.get(name);
+            ClassModel model = this.classModel(name);
             this.current = name;
             if (name.startsWith(SKIP_PACKAGE) || model.methods().stream().noneMatch(this::needsRewrite)) {
                 continue;
@@ -251,7 +320,7 @@ public final class OwnershipTransform {
                 return true;
             }
 
-            ClassModel model = this.classes.get(c);
+            ClassModel model = this.classModel(c);
             c = model == null ? null : model.superclass().map(s -> s.asInternalName()).orElse(null);
         }
 
@@ -267,7 +336,7 @@ public final class OwnershipTransform {
             return true;
         }
 
-        ClassModel model = this.classes.get(name);
+        ClassModel model = this.classModel(name);
         if (model == null) {
             return false;
         }
@@ -319,7 +388,7 @@ public final class OwnershipTransform {
         } else if (LOGGED.contains(name)) {
             kind = Kind.LOGGED;
         } else {
-            ClassModel model = this.classes.get(name);
+            ClassModel model = this.classModel(name);
             kind = model == null || model.superclass().isEmpty() ? Kind.NONE : this.kind(model.superclass().get().asInternalName());
         }
 
@@ -329,7 +398,7 @@ public final class OwnershipTransform {
 
     private boolean isUnownedField(final String owner, final String fieldName) {
         for (String name = owner; name != null; ) {
-            ClassModel model = this.classes.get(name);
+            ClassModel model = this.classModel(name);
             if (model == null) {
                 return false;
             }
@@ -367,6 +436,8 @@ public final class OwnershipTransform {
         private Label bodyStart;
         private int line;
         EntryHook entryHook;
+        boolean guard;
+        String methodName;
 
         Rewrite(final String className, final boolean fields, final MethodModel synchronizedMethod, final ClassDesc thisClass) {
             this.className = className;
@@ -399,9 +470,13 @@ public final class OwnershipTransform {
 
         @Override
         public void atStart(final CodeBuilder builder) {
+            if (this.guard) {
+                builder.loadConstant(this.className + "." + this.methodName);
+                builder.invokestatic(TXN, "modCallback", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String));
+            }
             // The owner's world lock comes before any monitor, never inside it.
             if (this.entryHook != null) {
-                int site = OwnershipTransform.this.sites.size();
+                int site = OwnershipTransform.this.siteBase + OwnershipTransform.this.sites.size();
                 OwnershipTransform.this.sites.add(this.className + " entry");
                 builder.aload(0);
                 if (this.entryHook.ownedBase() != null) {
@@ -465,7 +540,7 @@ public final class OwnershipTransform {
         private void hookWrite(final CodeBuilder builder, final FieldInstruction field) {
             Kind kind = OwnershipTransform.this.kindOf(field);
             String owner = field.owner().asInternalName();
-            int site = OwnershipTransform.this.sites.size();
+            int site = OwnershipTransform.this.siteBase + OwnershipTransform.this.sites.size();
             OwnershipTransform.this.sites.add(
                 owner.substring(owner.lastIndexOf('/') + 1) + "." + field.name().stringValue() + " in " + this.className + ":" + this.line
                     + "\t" + owner + "\t" + field.name().stringValue() + "\t" + field.typeSymbol().descriptorString()

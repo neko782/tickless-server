@@ -16,7 +16,7 @@
  import net.minecraft.world.ticks.LevelTicks;
  import net.minecraft.world.waypoints.WaypointTransmitter;
  import org.jspecify.annotations.Nullable;
-@@ -190,34 +_,40 @@
+@@ -190,34 +_,41 @@
      private static final IntProvider THUNDER_DELAY = UniformInt.of(12000, 180000);
      public static final IntProvider THUNDER_DURATION = UniformInt.of(3600, 15600);
      private static final Logger LOGGER = LogUtils.getLogger();
@@ -58,8 +58,8 @@
      protected final Raids raids;
 -    private final ObjectLinkedOpenHashSet<BlockEventData> blockEvents = new ObjectLinkedOpenHashSet<>();
 -    private final List<BlockEventData> blockEventsToReschedule = new ArrayList<>(64);
--    private boolean handlingTick;
-+    private final ThreadLocal<Boolean> handlingTick = ThreadLocal.withInitial(() -> false);
+     private boolean handlingTick;
++    private final ThreadLocal<Boolean> worldHandlingTick = ThreadLocal.withInitial(() -> false);
      private final List<CustomSpawner> customSpawners;
      private @Nullable EnderDragonFight dragonFight;
 -    private final Int2ObjectMap<EnderDragonPart> dragonParts = new Int2ObjectOpenHashMap<>();
@@ -149,7 +149,7 @@
              profiler.push("world border");
              this.getWorldBorder().tick();
              profiler.popPush("weather");
-@@ -387,78 +_,28 @@
+@@ -387,94 +_,102 @@
          if (runs) {
              this.tickTime();
          }
@@ -170,32 +170,19 @@
 -        }
 -
 -        profiler.popPush("chunkSource");
-+        this.eventScheduler.updateGameTime(this.getGameTime());
-+    }
-+
-+    /** Maintains chunk and entity storage; gameplay events have independent timers. */
-+    public void tick(final BooleanSupplier haveTime) {
-+        ProfilerFiller profiler = Profiler.get();
-+        boolean runs = this.tickRateManager().runsNormally();
-+        if (!runs) {
-+            this.frozenMaintenanceRuns++;
-+        }
-+
-+        profiler.push("chunkSource");
-         this.getChunkSource().tick(haveTime, true);
+-        this.getChunkSource().tick(haveTime, true);
 -        profiler.popPush("blockEvents");
 -        if (runs) {
 -            this.runBlockEvents();
 -        }
 -
 -        this.handlingTick = false;
-         profiler.pop();
-+        WorldTxn.mainSafePoint();
-         boolean isActive = this.chunkSource.hasActiveTickets();
-         if (isActive) {
-             this.resetEmptyTime();
-         }
- 
+-        profiler.pop();
+-        boolean isActive = this.chunkSource.hasActiveTickets();
+-        if (isActive) {
+-            this.resetEmptyTime();
+-        }
+-
 -        if (runs) {
 -            this.emptyTime++;
 -        }
@@ -232,34 +219,51 @@
 -                                    profiler.pop();
 -                                }
 -                            }
--                        }
--                    }
--                );
--            profiler.popPush("blockEntities");
--            this.tickBlockEntities();
--            profiler.pop();
-+        if (runs && this.emptySinceNanos < 0L) {
-+            this.emptySinceNanos = Util.getNanos();
-         }
- 
-         profiler.push("entityManagement");
-@@ -466,10 +_,10 @@
-         profiler.pop();
-         profiler.push("debugSynchronizers");
-         if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
--            this.neighborUpdater
-+            this.neighborUpdater()
-                 .setDebugListener(blockPos -> this.debugSynchronizers.broadcastEventToTracking(blockPos, DebugSubscriptions.NEIGHBOR_UPDATES, blockPos));
-         } else {
--            this.neighborUpdater.setDebugListener(null);
-+            this.neighborUpdater().setDebugListener(null);
-         }
- 
-         this.debugSynchronizers.tick(this.server.debugSubscribers());
-@@ -477,6 +_,59 @@
-         this.chunkSource.randomState().garbageCollect();
-     }
- 
++        this.eventScheduler.updateGameTime(this.getGameTime());
++    }
++
++    /** Maintains chunk and entity storage; gameplay events have independent timers. */
++    public void tick(final BooleanSupplier haveTime) {
++        this.handlingTick = true;
++        try {
++            ProfilerFiller profiler = Profiler.get();
++            boolean runs = this.tickRateManager().runsNormally();
++            if (!runs) {
++                this.frozenMaintenanceRuns++;
++            }
++
++            profiler.push("chunkSource");
++            this.getChunkSource().tick(haveTime, true);
++            profiler.pop();
++            WorldTxn.mainSafePoint();
++            boolean isActive = this.chunkSource.hasActiveTickets();
++            if (isActive) {
++                this.resetEmptyTime();
++            }
++
++            if (runs && this.emptySinceNanos < 0L) {
++                this.emptySinceNanos = Util.getNanos();
++            }
++
++            profiler.push("entityManagement");
++            this.entityManager.tick();
++            profiler.pop();
++            profiler.push("debugSynchronizers");
++            if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
++                this.neighborUpdater()
++                    .setDebugListener(blockPos -> this.debugSynchronizers.broadcastEventToTracking(blockPos, DebugSubscriptions.NEIGHBOR_UPDATES, blockPos));
++            } else {
++                this.neighborUpdater().setDebugListener(null);
++            }
++
++            this.debugSynchronizers.tick(this.server.debugSubscribers());
++            profiler.pop();
++            this.chunkSource.randomState().garbageCollect();
++        } finally {
++            this.handlingTick = false;
++        }
++    }
++
 +    /** One entity update. Runs on a world worker, or on the server thread for players. */
 +    public void tickEntityEvent(final Entity entity) {
 +        TickRateManager tickRateManager = this.tickRateManager();
@@ -271,10 +275,23 @@
 +                    if (vehicle != null) {
 +                        if (!vehicle.isRemoved() && vehicle.hasPassenger(entity)) {
 +                            return;
-+                        }
+                         }
 +
 +                        entity.stopRiding();
-+                    }
+                     }
+-                );
+-            profiler.popPush("blockEntities");
+-            this.tickBlockEntities();
+-            profiler.pop();
+-        }
+-
+-        profiler.push("entityManagement");
+-        this.entityManager.tick();
+-        profiler.pop();
+-        profiler.push("debugSynchronizers");
+-        if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
+-            this.neighborUpdater
+-                .setDebugListener(blockPos -> this.debugSynchronizers.broadcastEventToTracking(blockPos, DebugSubscriptions.NEIGHBOR_UPDATES, blockPos));
 +
 +                    this.guardEntityTick(this::tickNonPassenger, entity);
 +                }
@@ -308,14 +325,17 @@
 +        // chunk map knowing them at once, so they never wait behind queued worker updates.
 +        if (this.server.isSameThread() && (entity instanceof ServerPlayer || this.trackerUpdates.isEmpty())) {
 +            update.run();
-+        } else {
+         } else {
+-            this.neighborUpdater.setDebugListener(null);
 +            this.trackerUpdates.add(update);
-+        }
-+    }
-+
+         }
+-
+-        this.debugSynchronizers.tick(this.server.debugSubscribers());
+-        profiler.pop();
+-        this.chunkSource.randomState().garbageCollect();
+     }
+ 
      @Override
-     public boolean shouldTickBlocksAt(final long chunkPos) {
-         return this.chunkSource.chunkMap.getDistanceManager().inBlockTickingRange(chunkPos);
 @@ -512,7 +_,10 @@
  
          for (int i = 0; i < tickSpeed; i++) {
@@ -369,7 +389,7 @@
  
      public boolean isHandlingTick() {
 -        return this.handlingTick;
-+        return this.handlingTick.get();
++        return this.worldHandlingTick.get();
      }
  
      public boolean canSleepThroughNights() {
@@ -390,11 +410,11 @@
 +    }
 +
 +    void tickFluid(final BlockPos pos, final Fluid type) {
-+        this.handlingTick.set(true);
++        this.worldHandlingTick.set(true);
 +        try {
 +            this.tickFluidNow(pos, type);
 +        } finally {
-+            this.handlingTick.set(false);
++            this.worldHandlingTick.set(false);
 +        }
 +    }
 +
@@ -408,11 +428,11 @@
  
 -    private void tickBlock(final BlockPos pos, final Block type) {
 +    void tickBlock(final BlockPos pos, final Block type) {
-+        this.handlingTick.set(true);
++        this.worldHandlingTick.set(true);
 +        try {
 +            this.tickBlockNow(pos, type);
 +        } finally {
-+            this.handlingTick.set(false);
++            this.worldHandlingTick.set(false);
 +        }
 +    }
 +
@@ -603,11 +623,11 @@
 +    /** Runs one queued block event and tells nearby players. Called on a world worker. */
 +    void runBlockEvent(final BlockEventData eventData) {
 +        boolean handled;
-+        this.handlingTick.set(true);
++        this.worldHandlingTick.set(true);
 +        try {
 +            handled = this.doBlockEvent(eventData);
 +        } finally {
-+            this.handlingTick.set(false);
++            this.worldHandlingTick.set(false);
 +        }
 +
 +        if (handled) {

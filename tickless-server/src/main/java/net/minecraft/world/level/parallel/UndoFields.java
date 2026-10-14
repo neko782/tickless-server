@@ -54,21 +54,17 @@ final class UndoFields {
     }
 
     private static VarHandle lookup(final int site) {
-        String[] names = sites;
-        if (names == null) {
-            names = load();
-            sites = names;
+        String description;
+        if (site >= 1_000_000 && Boolean.getBoolean("tickless.fabric")) {
+            description = RuntimeOwnershipSites.describe(site);
+        } else {
+            String[] names = sites;
+            if (names == null) { names = load(); sites = names; }
+            if (site < 0 || site >= names.length) throw new IllegalStateException("Unknown write site " + site);
+            description = names[site];
         }
-
-        if (site < 0 || site >= names.length) {
-            throw new IllegalStateException("Unknown write site " + site);
-        }
-
-        // "description<TAB>owner<TAB>name<TAB>descriptor"
-        String[] parts = names[site].split("\t");
-        if (parts.length < 4) {
-            throw new IllegalStateException("Write site " + site + " names no field: " + names[site]);
-        }
+        String[] parts = description.split("\t");
+        if (parts.length < 4) throw new IllegalStateException("Write site names no field: " + description);
 
         return HANDLES.computeIfAbsent(parts[1] + "." + parts[2], key -> {
             try {

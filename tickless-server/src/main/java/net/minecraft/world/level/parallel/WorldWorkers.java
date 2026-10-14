@@ -104,6 +104,7 @@ public final class WorldWorkers implements AutoCloseable {
             WorldTxn.run(x, y, z, hasOrigin, event);
             return true;
         } catch (Throwable t) {
+            WorldTxn.reportFabricFailure(t);
             this.failures.increment();
             LOGGER.error("Exception in world event {}", description, t);
             return false;

@@ -9,12 +9,13 @@
  import it.unimi.dsi.fastutil.shorts.ShortList;
  import java.util.ArrayList;
  import java.util.Collections;
-@@ -84,12 +_,15 @@
+@@ -84,12 +_,16 @@
              return "<null>";
          }
      };
 -    private final Map<BlockPos, LevelChunk.RebindableTickingBlockEntityWrapper> tickersInLevel = Maps.newHashMap();
 -    private boolean loaded;
++    private final ThreadLocal<Boolean> loadingBlockEntity = ThreadLocal.withInitial(() -> false);
 +    private final Map<BlockPos, LevelChunk.RebindableTickingBlockEntityWrapper> tickersInLevel = new java.util.concurrent.ConcurrentHashMap<>();
 +    private volatile boolean loaded;
 +    private final LevelChunk.EventStream eventStream = new LevelChunk.EventStream();
@@ -144,7 +145,7 @@
      @Deprecated
      @Override
      public void addEntity(final Entity entity) {
-@@ -394,7 +_,11 @@
+@@ -394,7 +_,14 @@
      }
  
      public void addAndRegisterBlockEntity(final BlockEntity blockEntity) {
@@ -153,18 +154,18 @@
 +    }
 +
 +    private void addAndRegisterBlockEntity(final BlockEntity blockEntity, final boolean undoable) {
-+        this.setBlockEntity(blockEntity, undoable);
++        boolean loading = this.loadingBlockEntity.get();
++        this.loadingBlockEntity.set(!undoable);
++        try { this.setBlockEntity(blockEntity); }
++        finally { this.loadingBlockEntity.set(loading); }
          if (this.isInLevel()) {
              if (this.level instanceof ServerLevel serverLevel) {
                  this.addGameEventListener(blockEntity, serverLevel);
-@@ -419,6 +_,10 @@
+@@ -419,6 +_,7 @@
  
      @Override
      public void setBlockEntity(final BlockEntity blockEntity) {
-+        this.setBlockEntity(blockEntity, true);
-+    }
-+
-+    private void setBlockEntity(final BlockEntity blockEntity, final boolean undoable) {
++        boolean undoable = !this.loadingBlockEntity.get();
          BlockPos pos = blockEntity.getBlockPos();
          BlockState blockState = this.getBlockState(pos);
          if (!blockState.hasBlockEntity()) {

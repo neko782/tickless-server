@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "dev.tickless.conflict.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "ConflictMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

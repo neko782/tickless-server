@@ -1,6 +1,6 @@
 --- a/net/minecraft/world/level/chunk/LevelChunkSection.java
 +++ b/net/minecraft/world/level/chunk/LevelChunkSection.java
-@@ -58,12 +_,18 @@
+@@ -58,44 +_,46 @@
      }
  
      public BlockState setBlockState(final int sectionX, final int sectionY, final int sectionZ, final BlockState state, final boolean checkThreading) {
@@ -9,18 +9,79 @@
 -            previous = this.states.getAndSet(sectionX, sectionY, sectionZ, state);
 -        } else {
 -            previous = this.states.getAndSetUnchecked(sectionX, sectionY, sectionZ, state);
+-        }
+-
+-        if (!previous.isAir()) {
+-            this.nonEmptyBlockCount--;
+-            if (previous.isRandomlyTicking()) {
+-                this.tickingBlockCount--;
+-            }
+-
+-            FluidState previousFluid = previous.getFluidState();
+-            if (!previousFluid.isEmpty()) {
+-                this.fluidCount--;
+-                if (previousFluid.isRandomlyTicking()) {
+-                    this.tickingFluidCount--;
+-                }
+-            }
+-        }
+-
+-        if (!state.isAir()) {
+-            this.nonEmptyBlockCount++;
+-            if (state.isRandomlyTicking()) {
+-                this.tickingBlockCount++;
+-            }
+-
+-            FluidState fluid = state.getFluidState();
+-            if (!fluid.isEmpty()) {
+-                this.fluidCount++;
+-                if (fluid.isRandomlyTicking()) {
+-                    this.tickingFluidCount++;
+-                }
+-            }
+-        }
+-
+-        return previous;
 +        // The block counters change with the palette, so update both under the section latch.
 +        this.states.acquire();
 +
 +        try {
-+            return this.setBlockStateLatched(sectionX, sectionY, sectionZ, state);
++            BlockState previous = this.states.getAndSetUnchecked(sectionX, sectionY, sectionZ, state);
++
++            if (!previous.isAir()) {
++                this.nonEmptyBlockCount--;
++                if (previous.isRandomlyTicking()) {
++                    this.tickingBlockCount--;
++                }
++
++                FluidState previousFluid = previous.getFluidState();
++                if (!previousFluid.isEmpty()) {
++                    this.fluidCount--;
++                    if (previousFluid.isRandomlyTicking()) {
++                        this.tickingFluidCount--;
++                    }
++                }
++            }
++
++            if (!state.isAir()) {
++                this.nonEmptyBlockCount++;
++                if (state.isRandomlyTicking()) {
++                    this.tickingBlockCount++;
++                }
++
++                FluidState fluid = state.getFluidState();
++                if (!fluid.isEmpty()) {
++                    this.fluidCount++;
++                    if (fluid.isRandomlyTicking()) {
++                        this.tickingFluidCount++;
++                    }
++                }
++            }
++
++            return previous;
 +        } finally {
 +            this.states.release();
-         }
-+    }
-+
-+    private BlockState setBlockStateLatched(final int sectionX, final int sectionY, final int sectionZ, final BlockState state) {
-+        BlockState previous = this.states.getAndSetUnchecked(sectionX, sectionY, sectionZ, state);
++        }
+     }
  
-         if (!previous.isAir()) {
-             this.nonEmptyBlockCount--;
+     public boolean hasOnlyAir() {

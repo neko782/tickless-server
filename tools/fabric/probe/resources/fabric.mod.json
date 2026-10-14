@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "tickless-probe",
+  "version": "1.0.0",
+  "name": "Tickless parallel integration probe",
+  "environment": "server",
+  "entrypoints": {"server": ["dev.tickless.probe.Probe"]},
+  "mixins": ["tickless-probe.mixins.json"],
+  "depends": {"minecraft": "26.3", "fabricloader": ">=0.19.5", "fabric-api": "*"}
+}

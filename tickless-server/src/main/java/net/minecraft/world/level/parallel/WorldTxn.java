@@ -33,6 +33,8 @@ import org.slf4j.Logger;
  * cycle is the one rolled back, so every event eventually finishes.
  */
 public final class WorldTxn {
+    private static final boolean FABRIC = Boolean.getBoolean("tickless.fabric");
+    private static final boolean FABRIC_AGENT = Boolean.getBoolean("tickless.fabric.agent");
     static final Logger LOGGER = LogUtils.getLogger();
     public static final int READ_LOCK_RADIUS = Integer.getInteger("tickless.readRadius", 2);
     public static final LongAdder ABORTS = new LongAdder();
@@ -44,6 +46,12 @@ public final class WorldTxn {
     // it, and a scoped value lookup is cheaper than a thread local on short-lived virtual threads.
     private static final ScopedValue<Boolean> EVENT_SOURCE = ScopedValue.newInstance();
     private static final ScopedValue<WorldTxn> SCOPE = ScopedValue.newInstance();
+    private static final java.util.concurrent.ConcurrentLinkedQueue<Runnable> MOD_REPLAYS = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final java.util.Set<String> ROUTED_MODS = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static boolean replayingMods;
+    private static volatile @Nullable Throwable fabricFailure;
+    // Only Fabric callbacks allocate thread-local state; ordinary transactions keep their original layout.
+    private static final @Nullable ThreadLocal<String> MOD_ROUTE = FABRIC ? new ThreadLocal<>() : null;
     private static volatile @Nullable WorldTxn mainTxn;
     /**
      * Never acquired: always owned by the server thread's transaction. A worker blocked on the
@@ -144,6 +152,7 @@ public final class WorldTxn {
     /** Starts lock tracking. World workers must be running before events use locks. */
     public static void enable(final Thread mainThread, final Runnable pump) {
         mainThreadRef = mainThread;
+        fabricFailure = null;
         mainTxn = new WorldTxn(mainThread, true);
         SERVER_THREAD.owner = mainTxn;
         mainThreadPump = pump;
@@ -217,6 +226,7 @@ public final class WorldTxn {
                 MONITOR_HOLDERS.remove(txn);
             }
 
+            if (FABRIC) MOD_ROUTE.remove();
             txn.revocable = false;
             txn.releaseAll();
             txn.freeLog();
@@ -263,8 +273,75 @@ public final class WorldTxn {
                 }
             }
 
+            if (FABRIC && MOD_ROUTE.get() != null) {
+                this.replayOnMain(work);
+                return;
+            }
             this.awaitConflict();
         }
+    }
+
+    /**
+     * Guard installed at ordinary mod callback entries, after Mixin has merged them.
+     * No mod code executes in a rollbackable worker transaction unless it declares ParallelSafe.
+     */
+    public static void modCallback(final String source) {
+        WorldTxn txn = currentWorker();
+        if (txn == null || txn.undoing) return;
+        if (FABRIC_AGENT && RuntimeOwnershipSites.isInfrastructure()) return;
+        if (!txn.revocable) {
+            IllegalStateException failure = new IllegalStateException("Tickless Fabric cannot route " + source
+                + " after a partial commit. The mod must mark a transaction-safe callback @ParallelSafe"
+                + " or invoke it before the event commits; refusing an unsafe off-thread callback.");
+            fabricFailure = failure;
+            throw failure;
+        }
+        MOD_ROUTE.set(source);
+        txn.abortRequested = true;
+        throw Abort.INSTANCE;
+    }
+
+    /** Turns a compatibility failure into a normal server crash/shutdown instead of dropping callbacks. */
+    public static void throwIfFabricFailed() {
+        if (!FABRIC) return;
+        Throwable failure = fabricFailure;
+        if (failure != null) throw new IllegalStateException("Tickless Fabric stopped because a mod is incompatible", failure);
+    }
+
+    public static void reportFabricFailure(final Throwable failure) {
+        if (FABRIC && failure instanceof LinkageError) fabricFailure = failure;
+    }
+
+    private void replayOnMain(final Runnable work) {
+        String source = MOD_ROUTE.get();
+        MOD_ROUTE.remove();
+        this.abortedOn = null;
+        if (ROUTED_MODS.add(source)) LOGGER.info("Tickless Fabric: routing callback {} with its enclosing transaction to the server thread", source);
+        java.util.concurrent.CompletableFuture<Void> complete = new java.util.concurrent.CompletableFuture<>();
+        MOD_REPLAYS.add(() -> {
+            try { WorldTxn.run(this.originX, this.originY, this.originZ, this.hasOrigin, work); complete.complete(null); }
+            catch (Throwable failure) { complete.completeExceptionally(failure); }
+        });
+        // This event holds no locks and does not prevent a queued save from making progress.
+        ACTIVE.decrement();
+        try { awaitServerThread(complete); }
+        finally { ACTIVE.increment(); }
+    }
+
+    private static void pollModReplays() {
+        if (!FABRIC || replayingMods || exclusive || gateClosed || Thread.currentThread() != mainThreadRef) return;
+        WorldTxn main = mainTxn;
+        if (main == null || main.depth != 0) return;
+        replayingMods = true;
+        try {
+            // Bound each batch so a mod receiving every entity step cannot starve networking.
+            for (int i = 0; i < 64; i++) {
+                Runnable work = MOD_REPLAYS.poll();
+                if (work == null) break;
+                work.run();
+                main.releaseAll();
+            }
+        } finally { replayingMods = false; }
     }
 
     /** Runs deferred work and commit actions, then releases every lock. Nothing done so far can be undone after this. */
@@ -643,6 +720,7 @@ public final class WorldTxn {
         WorldTxn txn = mainTxn;
         if (txn != null && Thread.currentThread() == txn.thread && txn.depth == 0) {
             txn.releaseAll();
+            if (FABRIC) pollModReplays();
         }
     }
 
@@ -798,6 +876,7 @@ public final class WorldTxn {
             pumping = true;
             try {
                 pump.run();
+                if (FABRIC) pollModReplays();
             } finally {
                 pumping = false;
             }

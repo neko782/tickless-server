@@ -119,27 +119,35 @@
          LongIterator iterator = this.chunksToEagerlySave.iterator();
  
          while (eagerlySavedCount < 20 && this.activeChunkWrites.get() < 128 && haveTime.getAsBoolean() && iterator.hasNext()) {
-@@ -513,6 +_,24 @@
+@@ -512,7 +_,31 @@
+ 
      private void scheduleUnload(final long pos, final ChunkHolder chunkHolder) {
          CompletableFuture<?> saveSyncFuture = chunkHolder.getSaveSyncFuture();
-         saveSyncFuture.thenRunAsync(() -> {
-+            // Save-sync futures cover chunk generation, not world events. Drain running events
-+            // before taking the final snapshot or clearing block entities. Revalidate inside
-+            // the gate: tickets may revive this holder while the unload is waiting.
-+            Runnable unload = () -> this.finishUnload(pos, chunkHolder, saveSyncFuture);
-+            if (net.minecraft.world.level.parallel.WorldTxn.isEnabled() && !net.minecraft.world.level.parallel.WorldTxn.isExclusive()) {
-+                net.minecraft.world.level.parallel.WorldTxn.requestExclusive(unload);
-+            } else {
-+                unload.run();
+-        saveSyncFuture.thenRunAsync(() -> {
++        // Keep the vanilla unload lambda's name, descriptor and save call site for Fabric
++        // lifecycle mixins. Explicit callbacks here avoid renumbering that compatibility site.
++        saveSyncFuture.thenRunAsync(new Runnable() {
++            @Override public void run() {
++                // Revalidate only after running world events have drained.
++                Runnable unload = () -> ChunkMap.this.finishUnload(pos, chunkHolder, saveSyncFuture);
++                if (net.minecraft.world.level.parallel.WorldTxn.isEnabled() && !net.minecraft.world.level.parallel.WorldTxn.isExclusive()) {
++                    net.minecraft.world.level.parallel.WorldTxn.requestExclusive(unload);
++                } else {
++                    unload.run();
++                }
 +            }
-+        }, this.unloadQueue::add).whenComplete((ignored, throwable) -> {
-+            if (throwable != null) {
-+                LOGGER.error("Failed to save chunk {}", chunkHolder.getPos(), throwable);
++        }, this.unloadQueue::add).whenComplete(new java.util.function.BiConsumer<Object, Throwable>() {
++            @Override public void accept(Object ignored, Throwable throwable) {
++                if (throwable != null) LOGGER.error("Failed to save chunk {}", chunkHolder.getPos(), throwable);
 +            }
 +        });
 +    }
 +
 +    private void finishUnload(final long pos, final ChunkHolder chunkHolder, final CompletableFuture<?> saveSyncFuture) {
++        this.lambda$scheduleUnload$0(chunkHolder, saveSyncFuture, pos);
++    }
++
++    private void lambda$scheduleUnload$0(final ChunkHolder chunkHolder, final CompletableFuture<?> saveSyncFuture, final long pos) {
 +        try {
              CompletableFuture<?> currentFuture = chunkHolder.getSaveSyncFuture();
              if (currentFuture != saveSyncFuture) {
