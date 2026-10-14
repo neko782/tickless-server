@@ -498,6 +498,15 @@ Endermen lock the block they take or place and read it again under the lock. Ent
 read blocks without locks, so two endermen could both see the same dirt block, both remove it
 and both carry one, and a block placed by one could be overwritten by another's placement.
 
+Worker collision reads require a full chunk even if its tickets were demoted after the event
+started. The loaded fast path is unchanged; an unavailable chunk is requested with a worker
+ticket and the event waits through the normal server-thread edge. Treating a demoted chunk as
+air let entities fall through platforms during forceload flicker, sometimes dying far below.
+Mob pickup locks the item before checking its removal state or reading its stack; inventory
+carriers also revalidate retained references on entry. Otherwise two allays could copy the
+same stack, since a fully collected item's removed entity still retained its stack.
+`FlickerConservationCheck` reproduces both failures with real terrain and allays.
+
 Copper golem chest observations capture the chest position once before looking up its
 block state. A world lookup can yield to other work that changes the observation; using
 one immutable position prevents a null or unrelated position from being read afterward.

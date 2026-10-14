@@ -152,6 +152,19 @@
              this.getChunkAt(pos).removeBlockEntity(pos);
          }
      }
+@@ -766,7 +_,11 @@
+ 
+     @Override
+     public @Nullable BlockGetter getChunkForCollisions(final int chunkX, final int chunkZ) {
+-        return this.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
++        // Tickets can demote a chunk while an admitted entity event is still moving through it.
++        // A worker must wait for terrain rather than treating that temporary absence as air.
++        boolean worker = net.minecraft.world.level.parallel.WorldTxn.isParticipant()
++            && !net.minecraft.world.level.parallel.WorldTxn.isServerThread(Thread.currentThread());
++        return this.getChunk(chunkX, chunkZ, ChunkStatus.FULL, worker);
+     }
+ 
+     @Override
 @@ -789,6 +_,18 @@
      }
  
