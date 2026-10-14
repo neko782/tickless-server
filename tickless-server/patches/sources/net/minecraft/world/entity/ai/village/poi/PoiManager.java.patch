@@ -127,6 +127,15 @@
      }
  
      public Optional<BlockPos> getRandom(
+@@ -204,7 +_,7 @@
+     public boolean release(final BlockPos pos) {
+         return this.getOrLoad(SectionPos.asLong(pos))
+             .map(section -> section.release(pos))
+-            .orElseThrow(() -> Util.pauseInIde(new IllegalStateException("POI never registered at " + pos)));
++            .orElse(false);
+     }
+ 
+     public boolean exists(final BlockPos pos, final Predicate<Holder<PoiType>> predicate) {
 @@ -221,8 +_,10 @@
      }
  

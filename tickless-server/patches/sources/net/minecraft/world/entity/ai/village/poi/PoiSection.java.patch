@@ -112,6 +112,20 @@
              LOGGER.debug("Removed POI of type {} @ {}", LogUtils.defer(poiRecord::getPoiType), LogUtils.defer(poiRecord::getPos));
              this.setDirty.run();
          }
+@@ -96,10 +_,11 @@
+         return this.getPoiRecord(pos).map(PoiRecord::getFreeTickets).orElse(0);
+     }
+ 
+-    public boolean release(final BlockPos pos) {
++    public synchronized boolean release(final BlockPos pos) {
+         PoiRecord record = this.records.get(SectionPos.sectionRelativePos(pos));
+         if (record == null) {
+-            throw (IllegalStateException)Util.pauseInIde(new IllegalStateException("POI never registered at " + pos));
++            // A block edit can remove the POI after a villager checks its remembered type.
++            return false;
+         }
+ 
+         boolean success = record.releaseTicket();
 @@ -123,7 +_,7 @@
          return this.getPoiRecord(pos).map(DebugPoiInfo::new);
      }

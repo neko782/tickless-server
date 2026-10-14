@@ -28,6 +28,7 @@ public class PoiSnapshotCheck {
         if (section.getRecords(t -> true, PoiManager.Occupancy.HAS_SPACE).count() != 1) throw new AssertionError("Release not visible");
         section.remove(pos);
         if (section.getRecords(t -> true, PoiManager.Occupancy.ANY).count() != 0) throw new AssertionError("Remove not published");
+        if (section.release(pos)) throw new AssertionError("Released a ticket after its POI was removed");
         section.add(pos, type);
         if (section.getRecords(t -> false, PoiManager.Occupancy.ANY).count() != 0
             || section.getRecords(t -> true, PoiManager.Occupancy.ANY).count() != 1) throw new AssertionError("Readd/filter failed");
@@ -44,6 +45,6 @@ public class PoiSnapshotCheck {
             var read = java.util.concurrent.CompletableFuture.supplyAsync(() -> held.getRecords(t -> true, PoiManager.Occupancy.ANY).count());
             if (read.get(2, java.util.concurrent.TimeUnit.SECONDS) != 1) throw new AssertionError("Held-section query changed membership");
         }
-        System.out.println("PoiSnapshotCheck passed: add/remove/readd, filtering, live exclusive tickets and monitor-free snapshot reads");
+        System.out.println("PoiSnapshotCheck passed: add/remove/readd, removed-POI release, filtering, live exclusive tickets and monitor-free snapshot reads");
     }
 }

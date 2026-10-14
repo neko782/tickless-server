@@ -1,0 +1,13 @@
+--- a/net/minecraft/world/entity/npc/InventoryCarrier.java
++++ b/net/minecraft/world/entity/npc/InventoryCarrier.java
+@@ -14,6 +_,10 @@
+     SimpleContainer getInventory();
+ 
+     static void pickUpItem(final ServerLevel level, final Mob mob, final InventoryCarrier inventoryCarrier, final ItemEntity itemEntity) {
++        net.minecraft.world.level.parallel.WorldLocks.lockEntity(itemEntity);
++        if (itemEntity.isRemoved()) {
++            return;
++        }
+         ItemStack itemStack = itemEntity.getItem();
+         if (mob.wantsToPickUp(level, itemStack)) {
+             SimpleContainer inventory = inventoryCarrier.getInventory();
