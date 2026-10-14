@@ -15,5 +15,5 @@ exec docker run --rm -i \
   -v "$PWD:/workspace" \
   -w /workspace/run \
   -e JAVA_OPTS="-XX:+UseZGC ${JAVA_OPTS:-}" \
-  eclipse-temurin:25-jdk \
+  eclipse-temurin:27-jdk \
   /workspace/build/install/minecraft-server/bin/minecraft-server --nogui "$@"

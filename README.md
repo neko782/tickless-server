@@ -112,9 +112,9 @@ stacks, chunk reloads, frozen entities or scheduled ticks. See [docs/soundness.m
 
 ## Known issues
 
-- **Rare JVM crash under extreme load.** A SIGSEGV inside the garbage collector (G1 and ZGC,
-  Temurin 25) has been seen during 100-fireball storms and 60,000-entity summons with virtual
-  threads. The cause is not found yet.
+- **Run on Java 27.** On Java 25 (Temurin 25.0.4.1), the JVM's garbage collector occasionally
+  crashed (G1 and ZGC) during 100-fireball storms and 60,000-entity summons with virtual threads.
+  The build still targets Java 25, but run it on Java 27, where those workloads have not crashed.
 - A chunk can unload while an event in it is still running; that event's last writes may not be
   saved. This only happens at the edge of the loaded area.
 - No plugin API. Datapacks work.
@@ -130,7 +130,7 @@ You need git and Java 17+ to start Gradle; the build downloads JDK 25 itself.
 ./gradlew createPaperclipJar      # single runnable jar in tickless-server/build/libs/
 ```
 
-Run the server with Java 25:
+Run the server with Java 27 (Java 25 also works, but see Known issues):
 
 ```sh
 java -XX:+UseZGC -Xmx8G -jar tickless-server/build/libs/tickless-paperclip-26.3-SNAPSHOT.jar --nogui

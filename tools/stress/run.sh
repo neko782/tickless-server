@@ -16,6 +16,7 @@
 # skips terrain generation.
 # SERVER_INSTALL selects another installed server, relative to the repository.
 # STRESS_GC selects zgc (default) or g1; STRESS_JAVA_OPTS adds explicit test JVM options.
+# STRESS_IMAGE selects the Java Docker image (default eclipse-temurin:27-jdk).
 set -eu
 
 cd "$(dirname "$0")/../.."
@@ -59,7 +60,7 @@ docker run --rm -i --name "tickless-$name" \
   --user "$(id -u):$(id -g)" \
   -e JAVA_OPTS="-Xmx6g $gc_opts -Dtickless.statsIntervalSeconds=5 $java_opts" \
   -v "$PWD:/workspace" -w "/workspace/$dir" \
-  eclipse-temurin:25-jdk \
+  "${STRESS_IMAGE:-eclipse-temurin:27-jdk}" \
   "/workspace/${SERVER_INSTALL:-build/install/minecraft-server}/bin/minecraft-server" --nogui < "$dir/in" > "$dir/out.log" 2>&1 &
 server=$!
 

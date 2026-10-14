@@ -39,7 +39,7 @@ def main():
         parser.error('Invalid label or insufficient benchmark samples')
     directory = ROOT / 'build/extended' / args.label
     directory.mkdir(parents=True, exist_ok=True)
-    mount = ['docker', 'run', '--rm', '--user', f'{os.getuid()}:{os.getgid()}', '-v', f'{ROOT}:/workspace', '-w', f'/workspace/build/extended/{args.label}', 'eclipse-temurin:25-jdk']
+    mount = ['docker', 'run', '--rm', '--user', f'{os.getuid()}:{os.getgid()}', '-v', f'{ROOT}:/workspace', '-w', f'/workspace/build/extended/{args.label}', 'eclipse-temurin:27-jdk']
     installations = [path.resolve().relative_to(ROOT) for path in (args.before, args.after)]
     subprocess.run(mount + ['javac', '-cp', f'/workspace/{installations[0]}/lib/*', '-d', '.', '/workspace/tools/SectionStorageCheck.java', '/workspace/tools/PoiChunkCacheCheck.java', '/workspace/tools/PoiChunkCacheBench.java'], check=True)
     (directory / 'build/checks').mkdir(parents=True, exist_ok=True)

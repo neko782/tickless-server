@@ -21,7 +21,7 @@ fi
 exec docker run --rm --user "$(id -u):$(id -g)" \
   -e CHECK_TIMEOUT="${CHECK_TIMEOUT:-150}" \
   -v "$PWD:/workspace" -w /workspace \
-  eclipse-temurin:25-jdk sh -eu -c '
+  eclipse-temurin:27-jdk sh -eu -c '
     install=$1
     shift
     classes=build/checks-focused
