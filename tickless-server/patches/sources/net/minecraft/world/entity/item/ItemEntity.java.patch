@@ -1,10 +1,15 @@
 --- a/net/minecraft/world/entity/item/ItemEntity.java
 +++ b/net/minecraft/world/entity/item/ItemEntity.java
-@@ -230,6 +_,11 @@
+@@ -230,6 +_,16 @@
      }
  
      private void tryToMerge(final ItemEntity other) {
-+        net.minecraft.world.level.parallel.WorldLocks.lockEntity(other);
++        // Merging is optional: after a dimension change this event can no longer be rolled back,
++        // and waiting for another item that is changing dimension too could deadlock.
++        if (!net.minecraft.world.level.parallel.WorldLocks.lockEntityIfSafe(other)) {
++            return;
++        }
++
 +        if (other.isRemoved() || this.isRemoved()) {
 +            return;
 +        }

@@ -74,6 +74,21 @@ public final class WorldLock {
         this.acquireSlow(txn);
     }
 
+    /** Takes the lock only if nobody else holds it; never waits. */
+    boolean tryAcquire(final WorldTxn txn) {
+        WorldTxn current = this.owner;
+        if (current == txn) {
+            return true;
+        }
+
+        if (current == null && OWNER.compareAndSet(this, null, txn)) {
+            txn.held.add(this);
+            return true;
+        }
+
+        return false;
+    }
+
     private void acquireSlow(final WorldTxn txn) {
         synchronized (this) {
             this.waiters++;

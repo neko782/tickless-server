@@ -752,6 +752,25 @@ public final class WorldTxn {
         lock.acquire(this);
     }
 
+    /**
+     * Takes {@code lock} for an optional action if this transaction can wait for it safely. A
+     * transaction that can no longer be rolled back (it moved an entity to another dimension) only
+     * takes a free lock: two such transactions waiting for each other form a cycle the deadlock
+     * resolver cannot break, and both would wait forever. Returns whether the lock is held.
+     */
+    public boolean lockIfSafe(final WorldLock lock) {
+        if (this.abortRequested) {
+            this.checkAbort(null);
+        }
+
+        if (this.mainThread || this.revocable) {
+            lock.acquire(this);
+            return true;
+        }
+
+        return lock.tryAcquire(this);
+    }
+
     public int heldCount() {
         return this.held.size();
     }

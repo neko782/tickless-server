@@ -55,6 +55,15 @@ public final class WorldLocks {
         }
     }
 
+    /**
+     * Locks an entity for an optional action, such as merging two item stacks, unless waiting for it
+     * could deadlock (see {@link WorldTxn#lockIfSafe}). Returns false if the action must be skipped.
+     */
+    public static boolean lockEntityIfSafe(final Entity entity) {
+        WorldTxn txn = WorldTxn.current();
+        return txn == null || txn.lockIfSafe(entity.worldLock);
+    }
+
     /** Locks an entity with its vehicle and passengers, which update together. */
     public static void lockEntityTree(final Entity entity) {
         WorldTxn txn = WorldTxn.current();
