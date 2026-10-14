@@ -184,7 +184,7 @@
 +    /** Waits until no world event is queued or running, serving chunk loads workers wait for. */
 +    private void drainWorldWorkers() {
 +        WorldTxn.mainSafePoint();
-+        while (!this.worldWorkers.isQuiescent()) {
++        while (!this.worldWorkers.isQuiescent() || WorldTxn.hasPendingExclusive()) {
 +            // Events waiting at their gate for exclusive work only drain once it has run.
 +            WorldTxn.pollExclusive();
 +            this.pumpChunkTasks();

@@ -259,7 +259,7 @@
  
          try {
              profiler.popPush("filteringSpawningChunks");
-@@ -387,19 +_,17 @@
+@@ -387,19 +_,21 @@
              profiler.popPush("tickSpawningChunks");
  
              for (LevelChunk chunk : spawningChunks) {
@@ -267,7 +267,11 @@
 +                ChunkPos pos = chunk.getPos();
 +                scheduler.runBlockEventAsync(
 +                    new BlockPos(pos.getMiddleBlockX(), this.level.getSeaLevel(), pos.getMiddleBlockZ()),
-+                    () -> this.tickSpawningChunk(chunk, spawningCategories, spawnCookie),
++                    () -> {
++                        if (chunk.loaded() && this.level.shouldTickBlocksAt(chunk.getPos().pack())) {
++                            this.tickSpawningChunk(chunk, spawningCategories, spawnCookie);
++                        }
++                    },
 +                    "spawning"
 +                );
              }

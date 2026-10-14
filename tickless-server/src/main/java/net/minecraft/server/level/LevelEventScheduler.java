@@ -431,12 +431,14 @@ public final class LevelEventScheduler {
         try {
             this.workers.execute(() -> {
                 try {
-                    if (timer.active && this.level.tickRateManager().runsNormally() && !this.level.isDebug()) {
-                        this.level.getBlockTicks().runDueTicks(timer.chunkKey, gameTime, 65536,
-                            (scheduled, run) -> this.runBlockEvent(scheduled.pos(), run, scheduled), this.level::tickBlock);
-                        this.level.getFluidTicks().runDueTicks(timer.chunkKey, gameTime, 65536,
-                            (scheduled, run) -> this.runBlockEvent(scheduled.pos(), run, scheduled), this.level::tickFluid);
-                    }
+                    WorldTxn.runEventSource(() -> {
+                        if (timer.active && this.level.tickRateManager().runsNormally() && !this.level.isDebug()) {
+                            this.level.getBlockTicks().runDueTicks(timer.chunkKey, gameTime, 65536,
+                                (scheduled, run) -> this.runBlockEvent(scheduled.pos(), run, scheduled), this.level::tickBlock);
+                            this.level.getFluidTicks().runDueTicks(timer.chunkKey, gameTime, 65536,
+                                (scheduled, run) -> this.runBlockEvent(scheduled.pos(), run, scheduled), this.level::tickFluid);
+                        }
+                    });
                 } finally {
                     timer.queued.set(false);
                     this.refreshScheduledTimer(timer);
@@ -478,7 +480,12 @@ public final class LevelEventScheduler {
             this.workers.execute(() -> {
                 for (BlockEntityTimer timer : batch) {
                     try {
-                        this.runBlockEvent(timer.pos, timer.ticker::tick, timer.ticker);
+                        this.runBlockEvent(timer.pos, () -> {
+                            // A task can have waited at the exclusive gate while its chunk unloaded.
+                            if (timer.active && !timer.ticker.isRemoved()) {
+                                timer.ticker.tick();
+                            }
+                        }, timer.ticker);
                     } finally {
                         timer.queued.set(false);
                     }
@@ -542,6 +549,10 @@ public final class LevelEventScheduler {
     }
 
     private void runChunkStep(final LevelChunk chunk) {
+        WorldTxn.runEventSource(() -> this.runChunkStepWhileLoaded(chunk));
+    }
+
+    private void runChunkStepWhileLoaded(final LevelChunk chunk) {
         if (!chunk.loaded() || !chunk.getFullStatus().isOrAfter(FullChunkStatus.BLOCK_TICKING)) {
             return;
         }

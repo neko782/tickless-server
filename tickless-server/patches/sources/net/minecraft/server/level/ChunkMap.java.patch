@@ -17,13 +17,14 @@
  import net.minecraft.world.level.gamerules.GameRules;
  import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
  import net.minecraft.world.level.levelgen.NoiseRouterData;
-@@ -146,10 +_,13 @@
+@@ -146,10 +_,14 @@
      private final Long2ByteMap chunkTypeCache = new Long2ByteOpenHashMap();
      private final Long2LongMap nextChunkSaveTime = new Long2LongOpenHashMap();
      private final LongSet chunksToEagerlySave = new LongLinkedOpenHashSet();
 +    // Chunks become unsaved on world workers; the server thread moves them into the eager-save set.
 +    private final java.util.Queue<Long> chunksBecameUnsaved = new java.util.concurrent.ConcurrentLinkedQueue<>();
      private final Queue<Runnable> unloadQueue = Queues.newConcurrentLinkedQueue();
++    private boolean eagerSavePending;
      private final AtomicInteger activeChunkWrites = new AtomicInteger();
      private int serverViewDistance;
      private final WorldGenContext worldGenContext;
@@ -93,8 +94,21 @@
      private void processUnloads(final BooleanSupplier haveTime) {
          for (LongIterator iterator = this.toDrop.iterator(); iterator.hasNext(); iterator.remove()) {
              long pos = iterator.nextLong();
-@@ -495,6 +_,11 @@
+@@ -493,8 +_,24 @@
+     }
+ 
      private void saveChunksEagerly(final BooleanSupplier haveTime) {
++        if (net.minecraft.world.level.parallel.WorldTxn.isEnabled() && !net.minecraft.world.level.parallel.WorldTxn.isExclusive()) {
++            if (!this.eagerSavePending && (!this.chunksBecameUnsaved.isEmpty() || !this.chunksToEagerlySave.isEmpty())) {
++                this.eagerSavePending = true;
++                net.minecraft.world.level.parallel.WorldTxn.requestExclusive(() -> {
++                    this.eagerSavePending = false;
++                    this.saveChunksEagerly(() -> true);
++                });
++            }
++            return;
++        }
++
          long now = Util.getMillis();
          int eagerlySavedCount = 0;
 +        Long unsaved;
@@ -105,6 +119,46 @@
          LongIterator iterator = this.chunksToEagerlySave.iterator();
  
          while (eagerlySavedCount < 20 && this.activeChunkWrites.get() < 128 && haveTime.getAsBoolean() && iterator.hasNext()) {
+@@ -513,6 +_,24 @@
+     private void scheduleUnload(final long pos, final ChunkHolder chunkHolder) {
+         CompletableFuture<?> saveSyncFuture = chunkHolder.getSaveSyncFuture();
+         saveSyncFuture.thenRunAsync(() -> {
++            // Save-sync futures cover chunk generation, not world events. Drain running events
++            // before taking the final snapshot or clearing block entities. Revalidate inside
++            // the gate: tickets may revive this holder while the unload is waiting.
++            Runnable unload = () -> this.finishUnload(pos, chunkHolder, saveSyncFuture);
++            if (net.minecraft.world.level.parallel.WorldTxn.isEnabled() && !net.minecraft.world.level.parallel.WorldTxn.isExclusive()) {
++                net.minecraft.world.level.parallel.WorldTxn.requestExclusive(unload);
++            } else {
++                unload.run();
++            }
++        }, this.unloadQueue::add).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                LOGGER.error("Failed to save chunk {}", chunkHolder.getPos(), throwable);
++            }
++        });
++    }
++
++    private void finishUnload(final long pos, final ChunkHolder chunkHolder, final CompletableFuture<?> saveSyncFuture) {
++        try {
+             CompletableFuture<?> currentFuture = chunkHolder.getSaveSyncFuture();
+             if (currentFuture != saveSyncFuture) {
+                 this.scheduleUnload(pos, chunkHolder);
+@@ -533,11 +_,9 @@
+                     this.nextChunkSaveTime.remove(chunk.getPos().pack());
+                 }
+             }
+-        }, this.unloadQueue::add).whenComplete((ignored, throwable) -> {
+-            if (throwable != null) {
+-                LOGGER.error("Failed to save chunk {}", chunkHolder.getPos(), throwable);
+-            }
+-        });
++        } catch (Exception error) {
++            LOGGER.error("Failed to save chunk {}", chunkHolder.getPos(), error);
++        }
+     }
+ 
+     protected boolean promoteChunkMap() {
 @@ -636,6 +_,17 @@
              if (centerChunk == null) {
                  throw new IllegalStateException("Parent chunk missing");

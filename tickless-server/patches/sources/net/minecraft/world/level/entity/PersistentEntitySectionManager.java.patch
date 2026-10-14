@@ -1,6 +1,6 @@
 --- a/net/minecraft/world/level/entity/PersistentEntitySectionManager.java
 +++ b/net/minecraft/world/level/entity/PersistentEntitySectionManager.java
-@@ -31,30 +_,59 @@
+@@ -31,30 +_,60 @@
  
  public class PersistentEntitySectionManager<T extends EntityAccess> implements AutoCloseable {
      private static final Logger LOGGER = LogUtils.getLogger();
@@ -21,6 +21,7 @@
 +    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<Visibility> chunkVisibility = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
 +    private final net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<PersistentEntitySectionManager.ChunkLoadStatus> chunkLoadStatuses = new net.minecraft.world.level.parallel.ConcurrentLong2ObjectMap<>();
      private final LongSet chunksToUnload = new LongOpenHashSet();
++    private boolean unloadPending;
      private final Queue<ChunkEntities<T>> loadingInbox = Queues.newConcurrentLinkedQueue();
  
      public PersistentEntitySectionManager(final Class<T> entityClass, final LevelCallback<T> callbacks, final EntityPersistentStorage<T> permanentStorage) {
@@ -142,11 +143,22 @@
          if (chunkLoadStatus == PersistentEntitySectionManager.ChunkLoadStatus.PENDING) {
              return false;
          }
-@@ -226,7 +_,13 @@
+@@ -226,7 +_,24 @@
      }
  
      private void processUnloads() {
 -        this.chunksToUnload.removeIf(chunkKey -> this.chunkVisibility.get(chunkKey) != Visibility.HIDDEN || this.processChunkUnload(chunkKey));
++        if (net.minecraft.world.level.parallel.WorldTxn.isEnabled() && !net.minecraft.world.level.parallel.WorldTxn.isExclusive()) {
++            if (!this.unloadPending && !this.chunksToUnload.isEmpty()) {
++                this.unloadPending = true;
++                net.minecraft.world.level.parallel.WorldTxn.requestExclusive(() -> {
++                    this.unloadPending = false;
++                    this.processUnloads();
++                });
++            }
++            return;
++        }
++
 +        // Unloading locks entities. While the server thread waits for a lock it runs chunk tasks,
 +        // which can change chunk status and so this set; iterate a copy.
 +        for (long chunkKey : this.chunksToUnload.toLongArray()) {

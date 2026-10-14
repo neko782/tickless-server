@@ -115,8 +115,6 @@ stacks, chunk reloads, frozen entities or scheduled ticks. See [docs/soundness.m
 - **Run on Java 27.** On Java 25 (Temurin 25.0.4.1), the JVM's garbage collector occasionally
   crashed (G1 and ZGC) during 100-fireball storms and 60,000-entity summons with virtual threads.
   The build still targets Java 25, but run it on Java 27, where those workloads have not crashed.
-- A chunk can unload while an event in it is still running; that event's last writes may not be
-  saved. This only happens at the edge of the loaded area.
 - No plugin API. Datapacks work.
 
 Do not run this on a world you care about without backups.

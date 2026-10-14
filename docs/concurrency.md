@@ -263,10 +263,20 @@ only, never while waiting for a world lock:
 Commands and datapack functions (including `#minecraft:tick` functions) run in the server
 thread's transaction while workers keep going; their block and entity writes lock like any other
 event's. Before, every command paused all workers, so a datapack with a tick function made the
-world effectively single-threaded. Only global swaps still pause the workers
-(`WorldTxn.runExclusive`): **autosave** and **`/save-all`**, which serialize entities and block
-entities, and the data swap at the end of **`/reload`** (also used by `/datapack`), which
-replaces recipes, loot tables, tags and functions that workers read.
+world effectively single-threaded. Save snapshots, chunk and entity unloads, and global data swaps pause the workers through
+`WorldTxn.requestExclusive`. New events wait at an admission gate while running events drain;
+the server thread continues servicing chunk loads and connections. **Autosave**, **`/save-all`**,
+eager chunk saves and final unload saves therefore serialize entities and block entities only
+when no worker can still mutate them. Deferred unloads recheck holder identity and entity
+visibility after draining, so tickets that revive a chunk cancel its pending unload. The data
+swap at the end of **`/reload`** (also used by `/datapack`) uses the same gate.
+
+Chunk random-tick producers and scheduled-tick drains also participate in admission through
+`WorldTxn.runEventSource`: their individual events retain independent transactions, but the
+chunk cannot be snapshotted between extracting a scheduled tick and running it. Nested events
+from an already admitted producer may finish through a closing gate. Queued block-entity
+and spawning events recheck lifetime inside their transaction after passing the gate, so
+work queued before unload cannot mutate a discarded chunk afterward.
 
 ## Deliberate races
 
@@ -523,9 +533,6 @@ ownership, concurrent additions, ticket changes, save and reload.
 - Same-tick ordering between different chunks is not deterministic. Redstone
   that relies on exact update order across chunk borders can behave differently
   from vanilla.
-- A chunk can unload while an event is still running in it. The event finishes
-  against the unloaded chunk and its last writes may not be saved; this only
-  happens at the edge of the loaded area.
 - `/tick sprint` advances the clock faster than chunks can follow; busy chunks
   skip steps instead of running every one.
 - Command blocks run their command on the worker that ticks them, with normal

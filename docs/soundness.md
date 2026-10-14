@@ -181,3 +181,24 @@ for correctness verification; these results establish no performance speedup.
 
 These tests cover the listed behaviors. They do not prove equivalence for all
 Minecraft contraptions or preserve vanilla ordering of concurrent events.
+
+## Active-event chunk unload regression
+
+`ChunkUnloadCheck` starts the normal dedicated server in a fresh temporary world with a
+test-only Java agent that captures its server instance. It loads a remote chunk, admits a
+worker transaction that retains that chunk, removes the force-load ticket, and services the
+real unload queue while the event is paused. The event then makes its final block write.
+The test requires unload to wait, and reload from disk to contain the final diamond block.
+The previous engine unloads while the event is paused and reloads the old stone block.
+The agent is assembled under `build/` by the check and is never included in the server jar.
+
+`ChunkUnloadLifecycleCheck` exercises the real entity section manager with captured save
+snapshots. It requires the final entity write to precede persistence and removal, checks
+that revived visibility cancels a deferred unload, and verifies nested events from an
+admitted producer can drain through a closing save gate. `QueuedChunkTimerCheck` queues a
+retained ticker while the gate is closed, ends its chunk lifetime, and requires that ticker
+to skip its stale update after admission. The previous engine fails both lifecycle checks.
+
+All three checks are discovered by `./test.sh` through its focused scenario. Each has bounded
+waits; the dedicated-server regression has an 80-second process deadline and uses its own
+world and a dynamically allocated network port.

@@ -42,6 +42,7 @@ public final class WorldTxn {
     private static final java.util.concurrent.atomic.AtomicLong STAMPS = new java.util.concurrent.atomic.AtomicLong();
     // A worker's transaction is bound for the length of its event. Every block access asks for
     // it, and a scoped value lookup is cheaper than a thread local on short-lived virtual threads.
+    private static final ScopedValue<Boolean> EVENT_SOURCE = ScopedValue.newInstance();
     private static final ScopedValue<WorldTxn> SCOPE = ScopedValue.newInstance();
     private static volatile @Nullable WorldTxn mainTxn;
     /**
@@ -219,6 +220,25 @@ public final class WorldTxn {
             txn.revocable = false;
             txn.releaseAll();
             txn.freeLog();
+            ACTIVE.decrement();
+        }
+    }
+
+    /**
+     * Protects a worker's event producer from save/unload while it holds chunk data or extracts
+     * scheduled ticks. Individual events still get independent, rollback-capable transactions.
+     * Nested events may enter a closed gate: their already-admitted producer is being drained.
+     */
+    public static void runEventSource(final Runnable source) {
+        if (current() != null || EVENT_SOURCE.isBound()) {
+            source.run();
+            return;
+        }
+        WorldTxn guard = new WorldTxn(Thread.currentThread(), false);
+        guard.enterGate();
+        try {
+            ScopedValue.where(EVENT_SOURCE, true).run(source);
+        } finally {
             ACTIVE.decrement();
         }
     }
@@ -660,6 +680,9 @@ public final class WorldTxn {
 
     private void enterGate() {
         ACTIVE.increment();
+        if (EVENT_SOURCE.isBound()) {
+            return;
+        }
         while (gateClosed || exclusive) {
             ACTIVE.decrement();
             // Parks rather than Object.wait, which can keep virtual thread carriers busy (see WorldLock).
@@ -692,6 +715,11 @@ public final class WorldTxn {
         // Counted first, so the count never drops below the queued work.
         EXCLUSIVE_PENDING.incrementAndGet();
         EXCLUSIVE_REQUESTS.add(action);
+    }
+
+    /** Whether save/unload work still needs to run before world shutdown. */
+    public static boolean hasPendingExclusive() {
+        return EXCLUSIVE_PENDING.get() != 0;
     }
 
     /**
