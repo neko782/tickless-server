@@ -220,6 +220,17 @@ locks taken after that use `WorldTxn.lockIfSafe`, which only takes a free lock: 
 through a portal together each merged with the other, and the two irrevocable events waited for
 each other forever. They now skip the merge (`IrrevocableLockCheck`, `adversarial.py portal_rush`).
 
+A player's block action (placing, breaking, using an item) is acknowledged when its event
+commits, not at the next connection tick (`PlayerLane`, `ServerGamePacketListenerImpl.finishLaneAcks`).
+The client keeps its predicted blocks until the ack and then falls back to the last states the
+server sent, so the ack must not overtake the action's block updates. The event records the
+blocks it changes (`WorldTxn.trackBlockChanges`), and a commit action, which runs while the
+event still holds its locks, sends the player those blocks and then the ack. Block changes
+otherwise reach players from the world maintenance timer, which runs independently of the
+connection tick: before, about a fifth of acks arrived before the block they acknowledged. An
+action that changes more than 64 blocks, or blocks in another level, is acknowledged by the
+connection tick as before, and so is everything with `-Dtickless.immediateAcks=false`.
+
 Not undone, because a rollback is rare and none of them are visible in play: sounds and
 particles (level-wide broadcasts are not deferred), brain memories, attributes and effect
 timers, statistics, scores and advancements, scheduled ticks (they are deduplicated), chunk
@@ -514,10 +525,8 @@ chunks with 529 hopper rings, 552 piston clocks and a farm, one sample each:
 | 16,000 | not run | 12 ms/tick; 20 steps/s; ~410k events/s |
 
 Hopper item totals were conserved in every run (135,424 items). With 20 bots on
-an otherwise idle platform, the median block place/break round trip was 30–38 ms
-on tickless versus about 21 ms on vanilla. Both are within one to two game
-ticks; the server acknowledges block actions once per connection tick in both
-versions. The cause of the extra ~10 ms has not been measured yet.
+an otherwise idle platform, block actions are acknowledged in about 0.5 ms (p50), against
+0–50 ms on vanilla; see "Player actions" in the benchmarks.
 
 ## POI section identity and query snapshots
 

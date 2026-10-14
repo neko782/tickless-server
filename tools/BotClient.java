@@ -45,6 +45,8 @@ import net.minecraft.network.protocol.configuration.ConfigurationProtocols;
 import net.minecraft.network.protocol.configuration.ServerboundFinishConfigurationPacket;
 import net.minecraft.network.protocol.configuration.ServerboundSelectKnownPacks;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
@@ -99,6 +101,15 @@ public final class BotClient {
     private static final LongAdder ACTIONS = new LongAdder();
     private static final LongAdder ACKS = new LongAdder();
     private static final LongAdder TELEPORTS = new LongAdder();
+    // Acks that arrived before the server had sent the block state the action produced. A real
+    // client then shows its old block until the update arrives.
+    private static final LongAdder EARLY_ACKS = new LongAdder();
+    // Acks for actions whose block the server never sent at all: the action changed nothing.
+    private static final LongAdder NOOP_ACKS = new LongAdder();
+    private static final LongAdder EARLY_PLACE_ACKS = new LongAdder();
+    // Of those, the ones whose expected state did arrive afterwards: the ack overtook the update.
+    // The rest were actions that failed (a placement the server refused also leaves air).
+    private static final LongAdder OVERTAKEN_ACKS = new LongAdder();
     private static final List<Long> ACK_NANOS = Collections.synchronizedList(new ArrayList<>());
 
     public static void main(final String[] args) throws Exception {
@@ -128,7 +139,9 @@ public final class BotClient {
             CommonPacketTypes.CLIENTBOUND_DISCONNECT,
             GamePacketTypes.CLIENTBOUND_PLAYER_POSITION,
             GamePacketTypes.CLIENTBOUND_CHUNK_BATCH_FINISHED,
-            GamePacketTypes.CLIENTBOUND_BLOCK_CHANGED_ACK
+            GamePacketTypes.CLIENTBOUND_BLOCK_CHANGED_ACK,
+            GamePacketTypes.CLIENTBOUND_BLOCK_UPDATE,
+            GamePacketTypes.CLIENTBOUND_SECTION_BLOCKS_UPDATE
         ));
         if (OBSERVE_ENTITIES) {
             wanted.add(GamePacketTypes.CLIENTBOUND_ADD_ENTITY);
@@ -199,7 +212,7 @@ public final class BotClient {
             );
         System.out.println(
             "BOTS joined " + JOINED.sum() + ", disconnected " + DISCONNECTED.sum() + ", actions " + ACTIONS.sum() + ", acks " + ACKS.sum()
-                + ", teleports " + TELEPORTS.sum() + ", action latency " + latency
+                + ", teleports " + TELEPORTS.sum() + ", acks before block update " + EARLY_ACKS.sum() + " (placing " + EARLY_PLACE_ACKS.sum() + ", update arrived later " + OVERTAKEN_ACKS.sum() + "), acks for unchanged blocks " + NOOP_ACKS.sum() + ", action latency " + latency
         );
     }
 
@@ -256,6 +269,13 @@ public final class BotClient {
         private int ticks;
         private final AtomicInteger sequence = new AtomicInteger();
         private final Map<Integer, Long> pendingActions = new ConcurrentHashMap<>();
+        // Per action: the block it targets, and whether the action should leave it air.
+        private final Map<Integer, BlockPos> actionTargets = new ConcurrentHashMap<>();
+        private final Map<Integer, Boolean> actionMakesAir = new ConcurrentHashMap<>();
+        // Last block state the server sent for each position: true if air.
+        private final Map<BlockPos, Boolean> knownAir = new ConcurrentHashMap<>();
+        // Positions whose ack came first, and the state the action should have left there.
+        private final Map<BlockPos, Boolean> awaitingAfterAck = new ConcurrentHashMap<>();
         private BlockPos placed;
         private volatile boolean justTeleported;
         private boolean loaded;
@@ -318,7 +338,24 @@ public final class BotClient {
                         ACKS.increment();
                         ACK_NANOS.add(System.nanoTime() - sent);
                     }
+
+                    BlockPos target = this.actionTargets.remove(ack.sequence());
+                    Boolean makesAir = this.actionMakesAir.remove(ack.sequence());
+                    if (target != null) {
+                        Boolean air = this.knownAir.get(target);
+                        if (air == null) {
+                            NOOP_ACKS.increment();
+                        } else if (!makesAir.equals(air)) {
+                            EARLY_ACKS.increment();
+                            this.awaitingAfterAck.put(target, makesAir);
+                            if (!makesAir) {
+                                EARLY_PLACE_ACKS.increment();
+                            }
+                        }
+                    }
                 }
+                case ClientboundBlockUpdatePacket update -> this.blockUpdate(update.getPos(), update.getBlockState().isAir());
+                case ClientboundSectionBlocksUpdatePacket update -> update.runUpdates((pos, state) -> this.blockUpdate(pos, state.isAir()));
                 case ClientboundAddEntityPacket entity -> System.out.printf(
                     "ENTITY_ADD %s id=%d uuid=%s type=%s pos=%.4f,%.4f,%.4f rot=%.4f,%.4f%n",
                     this.name, entity.getId(), entity.getUUID(), BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()),
@@ -327,6 +364,15 @@ public final class BotClient {
                 case ClientboundSetEntityDataPacket data -> System.out.println("ENTITY_DATA " + this.name + " id=" + data.id() + " values=" + data.packedItems());
                 default -> {
                 }
+            }
+        }
+
+        private void blockUpdate(final BlockPos pos, final boolean air) {
+            BlockPos key = pos.immutable();
+            this.knownAir.put(key, air);
+            Boolean expected = this.awaitingAfterAck.get(key);
+            if (expected != null && expected == air && this.awaitingAfterAck.remove(key, expected)) {
+                OVERTAKEN_ACKS.increment();
             }
         }
 
@@ -451,6 +497,8 @@ public final class BotClient {
                     BlockPos floor = BlockPos.containing(next.x + 1.5, next.y - 0.5, next.z);
                     int seq = this.sequence.incrementAndGet();
                     this.pendingActions.put(seq, System.nanoTime());
+                    this.actionTargets.put(seq, floor.above());
+                    this.actionMakesAir.put(seq, false);
                     this.connection.send(
                         new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND, new BlockHitResult(Vec3.atCenterOf(floor).add(0.0, 0.5, 0.0), Direction.UP, floor, false), seq)
                     );
@@ -458,6 +506,8 @@ public final class BotClient {
                 } else {
                     int seq = this.sequence.incrementAndGet();
                     this.pendingActions.put(seq, System.nanoTime());
+                    this.actionTargets.put(seq, this.placed);
+                    this.actionMakesAir.put(seq, true);
                     this.connection.send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, this.placed, Direction.UP, seq));
                     this.placed = null;
                 }

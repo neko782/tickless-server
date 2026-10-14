@@ -40,6 +40,8 @@ public final class WorldTxn {
     public static final LongAdder ABORTS = new LongAdder();
     // Rollbacks asked for by the server thread after waiting for a lock (the rest break cycles).
     public static final LongAdder WOUNDS = new LongAdder();
+    // A player action that changed more blocks than this is acknowledged by the connection tick.
+    static final int MAX_TRACKED_BLOCK_CHANGES = 64;
     // Start stamps: the smaller, the older. Survives retries; the server thread is oldest.
     private static final java.util.concurrent.atomic.AtomicLong STAMPS = new java.util.concurrent.atomic.AtomicLong();
     // A worker's transaction is bound for the length of its event. Every block access asks for
@@ -129,6 +131,10 @@ public final class WorldTxn {
     private @Nullable Object cachedChunkLevel;
     private long cachedChunkKey;
     private @Nullable Object cachedChunk;
+    // Blocks this event changed, recorded only when a player's action asks (trackBlockChanges).
+    private it.unimi.dsi.fastutil.longs.@Nullable LongArrayList changedBlocks;
+    private @Nullable Object changedBlocksLevel;
+    private boolean changedBlocksOverflow;
 
     private WorldTxn(final Thread thread, final boolean mainThread) {
         this.thread = thread;
@@ -711,6 +717,53 @@ public final class WorldTxn {
      * Stops read locks for the rest of this event. Entity updates use this: they read many blocks
      * around them and rarely write them, and every write still locks.
      */
+    /**
+     * Starts recording the blocks this event changes, for a player action that tells its client
+     * which blocks changed before acknowledging it. Call it at the start of every attempt.
+     */
+    public void trackBlockChanges() {
+        this.changedBlocks = new it.unimi.dsi.fastutil.longs.LongArrayList();
+        this.changedBlocksLevel = null;
+        this.changedBlocksOverflow = false;
+    }
+
+    /** Records a block change in {@code level} for the current event, if it tracks them. */
+    public static void blockChanged(final Object level, final BlockPos pos) {
+        WorldTxn txn = currentWorker();
+        if (txn == null || txn.changedBlocks == null || txn.changedBlocksOverflow) {
+            return;
+        }
+
+        long key = pos.asLong();
+        if (txn.changedBlocksLevel == null) {
+            txn.changedBlocksLevel = level;
+        } else if (txn.changedBlocksLevel != level) {
+            txn.changedBlocksOverflow = true;
+            return;
+        }
+
+        if (!txn.changedBlocks.contains(key)) {
+            if (txn.changedBlocks.size() >= MAX_TRACKED_BLOCK_CHANGES) {
+                txn.changedBlocksOverflow = true;
+            } else {
+                txn.changedBlocks.add(key);
+            }
+        }
+    }
+
+    /**
+     * The blocks this event changed in {@code level} since {@link #trackBlockChanges}, or
+     * {@code null} if there were too many, or changes in another level.
+     */
+    public it.unimi.dsi.fastutil.longs.@Nullable LongList trackedBlockChanges(final Object level) {
+        if (this.changedBlocks == null || this.changedBlocksOverflow
+            || this.changedBlocksLevel != null && this.changedBlocksLevel != level) {
+            return null;
+        }
+
+        return this.changedBlocks;
+    }
+
     public void disableReadLocks() {
         this.readRadius = -1;
     }

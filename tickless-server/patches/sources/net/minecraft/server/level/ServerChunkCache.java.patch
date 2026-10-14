@@ -289,6 +289,14 @@
          profiler.pop();
      }
  
+@@ -452,6 +_,7 @@
+     }
+ 
+     public void blockChanged(final BlockPos pos) {
++        net.minecraft.world.level.parallel.WorldTxn.blockChanged(this.level, pos);
+         int xc = SectionPos.blockToSectionCoord(pos.getX());
+         int zc = SectionPos.blockToSectionCoord(pos.getZ());
+         ChunkHolder chunk = this.getVisibleChunkIfPresent(ChunkPos.pack(xc, zc));
 @@ -475,10 +_,21 @@
      }
  

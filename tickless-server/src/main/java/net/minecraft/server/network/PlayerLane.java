@@ -34,6 +34,8 @@ import org.slf4j.Logger;
 public final class PlayerLane {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int BATCH = 64;
+    // -Dtickless.immediateAcks=false acknowledges block actions at the connection tick, as before.
+    private static final boolean IMMEDIATE_ACKS = Boolean.parseBoolean(System.getProperty("tickless.immediateAcks", "true"));
     private final MinecraftServer server;
     private final ConcurrentLinkedQueue<Runnable> queue = new ConcurrentLinkedQueue<>();
     // A drainer is queued or running. Only the drainer runs items, so they run one at a time.
@@ -61,7 +63,23 @@ public final class PlayerLane {
         if (serverThread) {
             this.submit(() -> this.runOnServerThread(() -> PacketProcessor.handlePacket(listener, packet)));
         } else {
-            this.submit(() -> this.server.worldWorkers().runEvent(0, 0, 0, false, () -> PacketProcessor.handlePacket(listener, packet), packet));
+            this.submit(() -> this.server.worldWorkers().runEvent(0, 0, 0, false, () -> handleOnWorker(listener, packet), packet));
+        }
+    }
+
+    private static <T extends PacketListener> void handleOnWorker(final T listener, final Packet<T> packet) {
+        WorldTxn txn = WorldTxn.current();
+        if (!IMMEDIATE_ACKS || !(listener instanceof ServerGamePacketListenerImpl game) || txn == null) {
+            PacketProcessor.handlePacket(listener, packet);
+            return;
+        }
+
+        // Block actions are acknowledged when this event commits, not at the next connection tick.
+        game.beginLaneAcks(txn);
+        try {
+            PacketProcessor.handlePacket(listener, packet);
+        } finally {
+            game.finishLaneAcks(txn);
         }
     }
 

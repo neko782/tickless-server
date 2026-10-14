@@ -1,0 +1,16 @@
+gamerule spawn_mobs false
+gamerule advance_time false
+forceload add -32 -32 31 31
+sleep 5
+fill -32 199 -32 31 199 31 minecraft:stone
+setworldspawn 0 200 0
+gamerule respawn_radius 0
+sleep 2
+bots 20 30
+sleep 8
+give @a minecraft:stone 64
+sleep 3
+give @a minecraft:stone 64
+sleep 3
+give @a minecraft:stone 64
+sleep 22

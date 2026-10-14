@@ -553,20 +553,33 @@ why those runs lend less than the 3,000-mob run.
 
 ## Player actions
 
-20 headless bots (`tools/BotClient.java`) on an idle stone platform, each walking
-and alternately placing and breaking a block every 10 client ticks. The latency
-is the time from sending the action to receiving the server's block-change ack.
+`tools/stress/run.sh acklat tools/stress/latency.txt`: 20 headless bots
+(`tools/BotClient.java`) on an idle stone platform, each walking and alternately placing and
+breaking stone every 10 client ticks. The latency is the time from sending the action to
+receiving the server's block-change ack. "Ack overtook its block" counts acks whose block
+state the bot only received after the ack; a real client shows its old block until then.
+2026-10-14, Temurin 27 in Docker, one run each; the official vanilla jar.
 
-| Build | Joined | Actions / acks | Action latency p50 / p95 / p99 / max |
-| --- | ---: | --- | --- |
-| vanilla | 19 of 20² | 415 / 322 | 20.7 / 24.3 / 24.3 / 24.3 ms |
-| tickless | 20 of 20 | 441 / 432 | 37.6 / 40.1 / 40.2 / 40.2 ms |
+| Server | Actions / acks | Action latency p50 / p95 / p99 | Ack overtook its block |
+| --- | --- | --- | ---: |
+| vanilla | 849 / 835 | 46.5 / 47.3 / 47.5 ms | 3 |
+| tickless, acks at the connection tick (`-Dtickless.immediateAcks=false`) | 793 / 780 | 33.3 / 34.7 / 34.7 ms¹ | 165 |
+| tickless | 737 / 737 | 0.4 / 0.9 / 1.3 ms | 5 |
 
-² One bot did not finish joining within the short run window.
+¹ From the last report with samples, at 15 s.
 
-Both builds are within one to two game ticks. The extra ~15 ms on tickless has
-not been investigated. The bot does not simulate client movement fully, so both
-builds log "moved too quickly" for it.
+Vanilla, and tickless before, send the ack at the next 50 ms connection tick. The latency is
+then the time from the action to that tick, which barely changes within a run and is anywhere
+from 0 to 50 ms between runs: five runs of the same tickless server gave p50s of 25, 14, 9, 38
+and 31 ms, and five of vanilla 16, 10, 34, 22 and 41 ms. The 21 ms against 38 ms measured
+earlier was this, not slower handling. Tickless now acks when the action's event commits.
+
+The few overtaken acks on vanilla and tickless are likely bots placing into and breaking each
+other's blocks. About half of the placements fail on every server (the bots move crudely; the
+server corrects them with teleports), and only actions that changed a block can be overtaken.
+
+The bots only have blocks to place after the script's `give`. Without it they hold nothing,
+and their placements and breaks change no blocks.
 
 ## Lock stress
 

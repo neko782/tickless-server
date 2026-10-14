@@ -106,8 +106,9 @@ The full design is in [docs/concurrency.md](docs/concurrency.md).
   not reproduce vanilla's mob behaviour.
 - `/tick sprint` advances the clock faster than busy chunks can follow.
 - Command blocks run on the worker that ticks them, not in a world pause.
-- Player actions are acknowledged about one tick later than on vanilla (≈38 ms vs ≈21 ms p50
-  in a 20-bot test).
+- Block actions (placing, breaking, using an item) are acknowledged as soon as they commit,
+  not at the next tick: about 0.5 ms p50 on localhost in a 20-bot test, where vanilla takes
+  0–50 ms depending on where in the tick the action lands.
 
 What is checked: items in hopper rings, dropper/dispenser graphs, hopper minecarts and copper
 golems are conserved exactly under load; no duplication or loss in container moves, passenger
