@@ -184,7 +184,10 @@ also waits for the commit, and then hands the disconnect to the server thread wi
 for it. An entity added in an
 event is locked until the event commits, and a rollback discards it again. Moving an entity to
 another dimension or unloading it cannot be deferred, so the event becomes irrevocable
-(`WorldTxn.makeIrrevocable`): it stops logging and is never chosen as a victim.
+(`WorldTxn.makeIrrevocable`): it stops logging and is never chosen as a victim. Optional
+locks taken after that use `WorldTxn.lockIfSafe`, which only takes a free lock: items arriving
+through a portal together each merged with the other, and the two irrevocable events waited for
+each other forever. They now skip the merge (`IrrevocableLockCheck`, `adversarial.py portal_rush`).
 
 Not undone, because a rollback is rare and none of them are visible in play: sounds and
 particles (level-wide broadcasts are not deferred), brain memories, attributes and effect

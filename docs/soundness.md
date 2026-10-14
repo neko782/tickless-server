@@ -119,6 +119,34 @@ leaves the holder reader stuck at `BLOCK_TICKING`. Both fields are now volatile,
 so world workers see the server thread's status changes. These checks supplement
 the live border-spanning hopper and chunk-reload scenarios.
 
+## Adversarial conservation workloads
+
+`tools/stress/adversarial.py` runs the workloads in `gen_adversarial.py` on fresh worlds. Each
+builds a contraption while frozen, takes a baseline audit, runs it under load while chunks unload
+and reload (or flicker every 50 ms to 1.5 s), entities teleport and change dimension and the
+world saves, and audits again while frozen. An audit dumps every container, item entity, item
+frame, container minecart, allay, villager, armor stand and player inventory, with nested
+shulker box contents, plus experience orb totals and the UUID of every tagged entity. Later
+audits must hold exactly the baseline's items and the same UUIDs, each once (explosions may only
+lose). Workloads: `churn`, `flicker`, `restart` (clean stops under load, then restart),
+`portal`, `portal_rush`, `endrush`, `farhop`, `crowd` (1,800 mobs), `storage`, `pistons`,
+`machines` (shulker and crafter loops), `pickup`, `players` (bots), `xp`, `commands`
+(server-thread container destruction), `barter` and `boom`.
+
+```sh
+python3 tools/stress/adversarial.py run LABEL [WORKLOAD...] --seconds 10 --rounds 3
+python3 tools/stress/adversarial.py run LABEL WORKLOAD --install build/install/vanilla  # after setup_vanilla.sh
+```
+
+The `adversarial` scenario of `./test.sh` runs seven of them for one round. Layouts that lose
+items on vanilla 26.3 too were removed: villagers eat food, mobs that pick up loot destroy what
+they swap out, `/kill` on container minecarts drops nothing, and a hard kill after
+`save-all flush` leaves chunks saved at different ticks (eager chunk saves continue).
+
+`portal_rush` found a hang: items arriving through a portal in the same step merged with each
+other while both events were irrevocable (see "Rollbacks" in concurrency.md).
+`IrrevocableLockCheck` fails when an irrevocable transaction waits for an optional lock.
+
 ## Verification on 2026-10-02
 
 Engine: `build/install-final`, SHA-256
