@@ -648,6 +648,11 @@ is consumed. Ticket claims and releases retain their exclusive synchronization.
 `SectionStorageCheck` and `PoiChunkCacheCheck` cover identity, competing unpack
 ownership, concurrent additions, ticket changes, save and reload.
 
+Releasing a POI that a block edit already removed returns false. A villager's remembered-type
+check and ticket release can overlap TNT destroying its job block or bed. Section release
+also holds the section monitor so it cannot observe the temporary empty map during refresh.
+`PoiSnapshotCheck` covers release after removal; live records retain their ticket synchronization.
+
 ## Known gaps
 
 - While the server thread waits for a world lock it runs chunk tasks, so workers waiting for a
