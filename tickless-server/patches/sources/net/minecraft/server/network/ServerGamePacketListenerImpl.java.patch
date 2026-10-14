@@ -1,10 +1,11 @@
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -243,7 +_,13 @@
+@@ -243,7 +_,14 @@
      public ServerPlayer player;
      public final PlayerChunkSender chunkSender;
      private int tickCount;
 -    private int ackBlockChangesUpTo = -1;
++    private long attackAuditSequence;
 +    // Written by the player's lane, read and cleared by the connection tick on the server thread.
 +    private final java.util.concurrent.atomic.AtomicInteger ackBlockChangesUpTo = new java.util.concurrent.atomic.AtomicInteger(-1);
 +    // Acks for the packet the lane is handling now, sent when its event commits (see finishLaneAcks).
@@ -209,6 +210,57 @@
 +            this.send(ClientboundStartConfigurationPacket.INSTANCE);
 +            this.connection.setupOutboundProtocol(ConfigurationProtocols.CLIENTBOUND);
 +        });
+     }
+ 
+     @Override
+@@ -1883,30 +_,28 @@
+     @Override
+     public void handleAttack(final ServerboundAttackPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+-        if (this.hasClientLoaded() && !this.player.isSpectator()) {
+-            ServerLevel level = this.player.level();
+-            Entity target = level.getEntityOrPart(packet.entityId());
++        net.minecraft.server.level.AttackAudit.begin(this.player.getPlainTextName(), ++this.attackAuditSequence, packet.entityId());
++        try {
++            if (!this.hasClientLoaded()) { net.minecraft.server.level.AttackAudit.reason("client_not_loaded"); return; }
++            if (this.player.isSpectator()) { net.minecraft.server.level.AttackAudit.reason("spectator"); return; }
++            ServerLevel level=this.player.level();
++            Entity target=level.getEntityOrPart(packet.entityId());
+             this.player.resetLastActionTime();
+-            if (target != null && level.getWorldBorder().isWithinBounds(target.blockPosition())) {
+-                AABB targetBounds = target.getBoundingBox();
+-                ItemStack mainHandItem = this.player.getMainHandItem();
+-                if (this.player.isWithinAttackRange(mainHandItem, targetBounds, 3.0)) {
+-                    if (!mainHandItem.has(DataComponents.PIERCING_WEAPON)) {
+-                        if (target instanceof ItemEntity
+-                            || target instanceof ExperienceOrb
+-                            || target == this.player
+-                            || target instanceof AbstractArrow abstractArrow && !abstractArrow.isAttackable()) {
+-                            this.disconnect(Component.translatable("multiplayer.disconnect.invalid_entity_attacked"));
+-                            LOGGER.warn("Player {} tried to attack an invalid entity", this.player.getPlainTextName());
+-                        } else if (mainHandItem.isItemEnabled(level.enabledFeatures())) {
+-                            if (!this.player.cannotAttackWithItem(mainHandItem, 5)) {
+-                                this.player.attack(target);
+-                            }
+-                        }
+-                    }
+-                }
++            if (target==null) { net.minecraft.server.level.AttackAudit.reason("target_missing"); return; }
++            if (!level.getWorldBorder().isWithinBounds(target.blockPosition())) { net.minecraft.server.level.AttackAudit.reason("world_border"); return; }
++            ItemStack mainHandItem=this.player.getMainHandItem();
++            if (!this.player.isWithinAttackRange(mainHandItem,target.getBoundingBox(),3.0)) { net.minecraft.server.level.AttackAudit.reason("out_of_range"); return; }
++            if (mainHandItem.has(DataComponents.PIERCING_WEAPON)) { net.minecraft.server.level.AttackAudit.reason("piercing_weapon"); return; }
++            if (target instanceof ItemEntity || target instanceof ExperienceOrb || target==this.player
++                || target instanceof AbstractArrow arrow && !arrow.isAttackable()) {
++                net.minecraft.server.level.AttackAudit.reason("invalid_target");
++                this.disconnect(Component.translatable("multiplayer.disconnect.invalid_entity_attacked"));
++                LOGGER.warn("Player {} tried to attack an invalid entity",this.player.getPlainTextName()); return;
+             }
+-        }
++            if (!mainHandItem.isItemEnabled(level.enabledFeatures())) { net.minecraft.server.level.AttackAudit.reason("disabled_item"); return; }
++            if (this.player.cannotAttackWithItem(mainHandItem,5)) { net.minecraft.server.level.AttackAudit.reason("attack_cooldown"); return; }
++            this.player.attack(target);
++        } finally { net.minecraft.server.level.AttackAudit.finish(); }
      }
  
      @Override

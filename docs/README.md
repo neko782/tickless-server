@@ -8,6 +8,9 @@ single samples from the dates given; the current headline numbers are in the top
 
 - [concurrency.md](concurrency.md): world workers, locks, rollbacks, deliberate races, known gaps
 - [benchmarks.md](benchmarks.md): vanilla, Lithium, lag machines, heavy workloads, scaling
+- [pvp-random.md](pvp-random.md): empty-start random looting, armor upgrades, death drops and attack/item audits
+- [pvp-chaos.md](pvp-chaos.md): moving PvP, respawns, gear rain, capacity/CPU sweep and real-client recording
+- [pvp-arena.md](pvp-arena.md): networked survival combat/build latency, TPS and soundness audits
 - [extended-benchmarks.md](extended-benchmarks.md): AI, container, piston and falling-block workloads
 - [mod-optimizations.md](mod-optimizations.md): Lithium and Paper inspired single-thread optimizations
 - [soundness.md](soundness.md): lifecycle and conservation edge-case tests

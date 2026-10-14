@@ -87,7 +87,13 @@
          this.chunkSource = new ServerChunkCache(
              this,
              levelStorage,
-@@ -306,13 +_,39 @@
+@@ -302,17 +_,44 @@
+ 
+         this.sleepStatus = new SleepStatus();
+         this.gameEventDispatcher = new GameEventDispatcher(this);
+-        this.waypointManager = new ServerWaypointManager();
++        this.waypointManager = new ServerWaypointManager(this);
++        this.eventScheduler.addPeriodicEvent(this.waypointManager::flushUpdates, "waypoint updates", true);
          this.environmentAttributes = EnvironmentAttributeSystem.builder().addDefaultLayers(this).build();
          this.uncachedBiomeResolver = this.getChunkSource().getGenerator().getBiomeSource().createUncachedResolver(this.getChunkSource().randomState());
          this.updateSkyBrightness();

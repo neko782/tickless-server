@@ -221,6 +221,19 @@
              if (!wasIgnored) {
                  this.distanceManager.removePlayer(oldSection, player);
              }
+@@ -1140,7 +_,12 @@
+         return this.entityMap.containsKey(id);
+     }
+ 
++    private static final boolean SKIP_REMOVED_ITEMS = Boolean.parseBoolean(System.getProperty("tickless.skipRemovedItemTracking", "true"));
++
+     protected void addEntity(final Entity entity) {
++        // Item registration is deferred from worker commits. A pickup can remove it before
++        // this task runs; its queued removal still safely handles an absent tracker entry.
++        if (SKIP_REMOVED_ITEMS && entity instanceof net.minecraft.world.entity.item.ItemEntity && entity.isRemoved()) return;
+         if (!(entity instanceof EnderDragonPart)) {
+             EntityType<?> type = entity.getType();
+             int range = type.clientTrackingRange() * 16;
 @@ -1188,6 +_,8 @@
  
          List<ServerPlayer> movedPlayers = Lists.newArrayList();
@@ -230,13 +243,16 @@
  
          for (ChunkMap.TrackedEntity trackedEntity : this.entityMap.values()) {
              SectionPos oldPos = trackedEntity.lastSectionPos;
-@@ -1203,9 +_,18 @@
+@@ -1203,9 +_,21 @@
              }
  
              if (sectionPosChanged || trackedEntity.entity.needsSync || this.distanceManager.inEntityTickingRange(newPos.chunk().pack())) {
 -                trackedEntity.serverEntity.sendChanges();
-+                // Item frames tick shared map data for every player; players stay with their connection's thread.
-+                if (trackedEntity.entity instanceof ItemFrame || trackedEntity.entity instanceof ServerPlayer) {
++                // Player tracking runs in order with that player's packets and simulation.
++                // Item frames retain their shared map-data update on the server thread.
++                if (trackedEntity.entity instanceof ServerPlayer) {
++                    if (!trackedEntity.serverEntity.sendChangesOnPlayerLane()) changedOnServerThread.add(trackedEntity.serverEntity);
++                } else if (trackedEntity.entity instanceof ItemFrame) {
 +                    changedOnServerThread.add(trackedEntity.serverEntity);
 +                } else {
 +                    changed.add(trackedEntity.serverEntity);
@@ -268,15 +284,68 @@
      }
  
      public void waitForLightBeforeSending(final ChunkPos centerChunk, final int chunkRadius) {
-@@ -1347,6 +_,11 @@
-             for (ServerPlayerConnection connection : this.seenBy) {
-                 connection.send(packet);
-             }
-+        }
-+
-+        @Override
-+        public boolean hasTrackingPlayers() {
-+            return !this.seenBy.isEmpty();
+@@ -1323,7 +_,8 @@
+         private final Entity entity;
+         private final int range;
+         private SectionPos lastSectionPos;
+-        private final Set<ServerPlayerConnection> seenBy = Sets.newIdentityHashSet();
++        // The server thread changes membership while player lanes broadcast equipment/swings.
++        private final Set<ServerPlayerConnection> seenBy = new IdentitySnapshotSet<>();
+ 
+         public TrackedEntity(final Entity entity, final int range, final UpdateInterval updateInterval, final boolean trackDelta) {
+             this.serverEntity = new ServerEntity(ChunkMap.this.level, entity, updateInterval, trackDelta, this);
+@@ -1350,6 +_,11 @@
          }
  
          @Override
++        public boolean hasTrackingPlayers() {
++            return !this.seenBy.isEmpty();
++        }
++
++        @Override
+         public void sendToTrackingPlayersAndSelf(final Packet<? super ClientGamePacketListener> packet) {
+             this.sendToTrackingPlayers(packet);
+             if (this.entity instanceof ServerPlayer player) {
+@@ -1382,6 +_,7 @@
+         }
+ 
+         public void updatePlayer(final ServerPlayer player) {
++            if (SKIP_REMOVED_ITEMS && this.entity instanceof net.minecraft.world.entity.item.ItemEntity && this.entity.isRemoved()) return;
+             if (player != this.entity) {
+                 Vec3 deltaToPlayer = player.position().subtract(this.entity.position());
+                 int playerViewDistance = ChunkMap.this.getPlayerViewDistance(player);
+@@ -1392,17 +_,27 @@
+                     && this.entity.broadcastToPlayer(player)
+                     && ChunkMap.this.isChunkTracked(player, this.entity.chunkPosition().x(), this.entity.chunkPosition().z());
+                 if (visibleToPlayer) {
+-                    if (this.seenBy.add(player.connection)) {
+-                        this.serverEntity.addPairing(player);
+-                        if (this.seenBy.size() == 1) {
+-                            ChunkMap.this.level.debugSynchronizers().registerEntity(this.entity);
+-                        }
+-
+-                        ChunkMap.this.level.debugSynchronizers().startTrackingEntity(player, this.entity);
++                    if (SKIP_REMOVED_ITEMS && this.entity instanceof net.minecraft.world.entity.item.ItemEntity) {
++                        if (this.seenBy.contains(player.connection)) return;
++                        // Pair only a live item, and release this read-only source snapshot
++                        // before scanning other trackers. Existing outer ownership is retained.
++                        net.minecraft.world.level.parallel.WorldTxn.withMainSnapshotLock(this.entity.worldLock, () -> {
++                            if (!this.entity.isRemoved()) this.addTrackingPlayer(player);
++                        });
++                    } else {
++                        this.addTrackingPlayer(player);
+                     }
+                 } else {
+                     this.removePlayer(player);
+                 }
++            }
++        }
++
++        private void addTrackingPlayer(final ServerPlayer player) {
++            if (this.seenBy.add(player.connection)) {
++                this.serverEntity.addPairing(player);
++                if (this.seenBy.size() == 1) ChunkMap.this.level.debugSynchronizers().registerEntity(this.entity);
++                ChunkMap.this.level.debugSynchronizers().startTrackingEntity(player, this.entity);
+             }
+         }
+ 

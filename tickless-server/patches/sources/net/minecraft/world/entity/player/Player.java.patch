@@ -1,5 +1,34 @@
 --- a/net/minecraft/world/entity/player/Player.java
 +++ b/net/minecraft/world/entity/player/Player.java
+@@ -671,16 +_,16 @@
+     @Override
+     public boolean hurtServer(final ServerLevel level, final DamageSource source, float damage) {
+         if (this.isInvulnerableTo(level, source)) {
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this, "invulnerable");
+         }
+ 
+         if (this.abilities.invulnerable && !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY)) {
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this, "creative_invulnerable");
+         }
+ 
+         this.noActionTime = 0;
+         if (this.isDeadOrDying()) {
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this, "target_dead");
+         }
+ 
+         this.removeEntitiesOnShoulder();
+@@ -698,7 +_,7 @@
+             }
+         }
+ 
+-        return damage != 0.0F && super.hurtServer(level, source, damage);
++        return damage != 0.0F ? super.hurtServer(level, source, damage) : net.minecraft.server.level.AttackAudit.reject(this,"zero_damage");
+     }
+ 
+     @Override
 @@ -811,6 +_,7 @@
      }
  
@@ -8,3 +37,22 @@
          if (this.isSpectator()) {
              if (entity instanceof MenuProvider menuProvider) {
                  this.openMenu(menuProvider);
+@@ -938,7 +_,9 @@
+     }
+ 
+     public void attack(final Entity entity) {
+-        if (!this.cannotAttack(entity)) {
++        boolean canAttack = !this.cannotAttack(entity);
++        if (!canAttack) net.minecraft.server.level.AttackAudit.reason(entity,"unattackable");
++        if (canAttack) {
+             float baseDamage = this.isAutoSpinAttack() ? this.autoSpinAttackDmg : (float)this.getAttributeValue(Attributes.ATTACK_DAMAGE);
+             ItemStack attackingItemStack = this.getWeaponItem();
+             DamageSource damageSource = this.createAttackSource(attackingItemStack);
+@@ -972,6 +_,7 @@
+ 
+                     Vec3 oldMovement = entity.getDeltaMovement();
+                     boolean wasHurt = entity.hurtOrSimulate(damageSource, totalDamage);
++                    net.minecraft.server.level.AttackAudit.accepted(entity, wasHurt);
+                     if (wasHurt) {
+                         this.causeExtraKnockback(
+                             entity, this.getKnockback(entity, damageSource) + (knockbackAttack ? 0.5F : 0.0F), oldMovement, damageSource, totalDamage, true

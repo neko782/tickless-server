@@ -78,6 +78,8 @@ public final class LevelEventScheduler {
     public final LongAdder entityRequests = new LongAdder();
     /** Successfully committed non-player entity steps, independent of timer requests. */
     public final LongAdder completedEntitySteps = new LongAdder();
+    /** Advanced player simulation steps counted only after successful commit. */
+    public final LongAdder completedPlayerSteps = new LongAdder();
     public final LongAdder skippedChunkSteps = new LongAdder();
     public final LongAdder skippedEntitySteps = new LongAdder();
     /** Block entity steps skipped because the block entity was asleep. */
@@ -649,9 +651,13 @@ public final class LevelEventScheduler {
             ServerPlayer serverPlayer = (ServerPlayer)entity;
             Runnable step = () -> {
                 try {
+                    int before = entity.tickCount;
                     this.level.tickEntityEvent(entity);
                     if (serverPlayer.connection != null) {
                         serverPlayer.connection.tickPlayerTimer();
+                    }
+                    if (entity.tickCount != before) {
+                        WorldTxn.afterCommit(this.completedPlayerSteps::increment);
                     }
                 } finally {
                     entity.worldTickQueued.set(false);

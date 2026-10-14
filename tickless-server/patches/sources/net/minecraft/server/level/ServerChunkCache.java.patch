@@ -350,17 +350,22 @@
          return this.ticketStorage.updateChunkForced(pos, forced);
      }
  
-@@ -513,6 +_,21 @@
+@@ -513,6 +_,26 @@
      }
  
      public void move(final ServerPlayer player) {
 +        if (Thread.currentThread() != this.mainThread) {
++            if (!this.level.getServer().isRunning() || this.level.getServer().isStopped() || player.isRemoved()) {
++                return;
++            }
 +            // Player lanes move players on world workers; the chunk map, tickets and chunk sending
 +            // belong to the server thread. One pending update per player covers any number of moves.
 +            if (player.chunkMoveQueued.compareAndSet(false, true)) {
 +                this.level.getServer().execute(() -> {
 +                    player.chunkMoveQueued.set(false);
-+                    if (player.level().getChunkSource() == this) {
++                    // execute() runs inline after stop. Never re-enter move from a worker:
++                    // shutdown between enqueue and execution otherwise recurses until overflow.
++                    if (Thread.currentThread() == this.mainThread && player.level().getChunkSource() == this) {
 +                        this.move(player);
 +                    }
 +                });

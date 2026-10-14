@@ -100,7 +100,7 @@
          this.registries = worldStem.registries();
          if (!this.registries.compositeAccess().lookupOrThrow(Registries.LEVEL_STEM).containsKey(LevelStem.OVERWORLD)) {
              throw new IllegalStateException("Missing Overworld dimension data");
-@@ -623,7 +_,107 @@
+@@ -623,7 +_,112 @@
          this.stopServer();
      }
  
@@ -124,6 +124,7 @@
 +        long entityRequests = 0L;
 +        long skippedEntitySteps = 0L;
 +        long completedEntitySteps = 0L;
++        long completedPlayerSteps = 0L;
 +        long sleepingBlockEntitySteps = 0L;
 +        int entities = 0;
 +        int loadedChunks = 0;
@@ -137,6 +138,7 @@
 +            skippedEntitySteps += scheduler.skippedEntitySteps.sum();
 +            entities += scheduler.tickingEntityCount();
 +            completedEntitySteps += scheduler.completedEntitySteps.sum();
++            completedPlayerSteps += scheduler.completedPlayerSteps.sum();
 +            sleepingBlockEntitySteps += scheduler.sleepingBlockEntitySteps.sum();
 +        }
 +
@@ -149,7 +151,7 @@
 +        double chunkRate = chunkDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedChunkSteps - this.lastSkippedChunkSteps) / chunkDelta);
 +        double entityRate = entityDelta == 0L ? 0.0 : simulationRate * Math.max(0.0, 1.0 - (double)(skippedEntitySteps - this.lastSkippedEntitySteps) / entityDelta);
 +        LOGGER.info(
-+            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}, sleeping block entity steps {}",
++            "World workers: {} events/s, chunk step rate {}/s, entity step rate {}/s, server thread {}% busy, pending tasks {}, ticking entities {}, loaded chunks {}, rollbacks {} ({} for the server thread), failures {}, completed entity steps {}, sleeping block entity steps {}, online players {}, completed player steps {}, stats time ns {}",
 +            String.format(java.util.Locale.ROOT, "%.0f", (events - this.lastStatsEvents) / seconds),
 +            String.format(java.util.Locale.ROOT, "%.2f", chunkRate),
 +            String.format(java.util.Locale.ROOT, "%.2f", entityRate),
@@ -161,7 +163,10 @@
 +            WorldTxn.WOUNDS.sum(),
 +            this.worldWorkers.failures.sum(),
 +            completedEntitySteps,
-+            sleepingBlockEntitySteps
++            sleepingBlockEntitySteps,
++            this.getPlayerList().getPlayerCount(),
++            completedPlayerSteps,
++            now
 +        );
 +        this.lastStatsEvents = events;
 +        this.lastStatsSimulationSteps = this.tickCount;

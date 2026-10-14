@@ -553,6 +553,13 @@ why those runs lend less than the 3,000-mob run.
 
 ## Player actions
 
+The [PvP chaos capacity test](pvp-chaos.md) adds movement, rapid actions, deaths,
+respawns, chest looting and hopper-fed gear rain, with separate server/client CPU.
+
+The reproducible [PvP arena comparison](pvp-arena.md) adds real survival combat
+and validated building with 128 networked players, latency samples and per-player
+soundness/inventory audits.
+
 `tools/stress/run.sh acklat tools/stress/latency.txt`: 20 headless bots
 (`tools/BotClient.java`) on an idle stone platform, each walking and alternately placing and
 breaking stone every 10 client ticks. The latency is the time from sending the action to
@@ -697,3 +704,7 @@ ALL PASSED
 
 Logs remain local under ignored `build/`: `r2-test-final.log`, `stress-fabric-verified/out.log`,
 `r2-production-{a,b}.txt`, `r2-probe-overhead-{a,b}.txt` and their `stress-cmp-*/` worlds/logs.
+
+The [empty-start random PvP fixture](pvp-random.md) adds scattered chest/floor looting,
+armor upgrades, death drops, finite block placement and an exact committed attack
+outcome audit. Its workload and measurements are separate from the paired arena.

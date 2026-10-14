@@ -1,0 +1,48 @@
+--- a/net/minecraft/world/waypoints/WaypointTransmitter.java
++++ b/net/minecraft/world/waypoints/WaypointTransmitter.java
+@@ -12,6 +_,7 @@
+ 
+ public interface WaypointTransmitter extends Waypoint {
+     int REALLY_FAR_DISTANCE = 332;
++    boolean REUSE_ENTITY_CONNECTIONS = Boolean.parseBoolean(System.getProperty("tickless.reuseWaypointConnections", "true"));
+ 
+     boolean isTransmittingWaypoint();
+ 
+@@ -85,7 +_,7 @@
+         @Override
+         public boolean isBroken() {
+             return WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
+-                || WaypointTransmitter.isChunkVisible(this.source.chunkPosition(), this.receiver)
++                || (!REUSE_ENTITY_CONNECTIONS && WaypointTransmitter.isChunkVisible(this.source.chunkPosition(), this.receiver))
+                 || !WaypointTransmitter.isReallyFar(this.source, this.receiver);
+         }
+ 
+@@ -149,7 +_,13 @@
+ 
+         @Override
+         public boolean isBroken() {
+-            return WaypointTransmitter.BlockConnection.super.isBroken() || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver);
++            if (!REUSE_ENTITY_CONNECTIONS) return WaypointTransmitter.BlockConnection.super.isBroken()
++                || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver);
++            // Absolute position updates support arbitrary movement. Rebuild only when the
++            // display mode chosen by LivingEntity.makeWaypointConnectionWith changes.
++            return WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
++                || WaypointTransmitter.isReallyFar(this.source, this.receiver)
++                || !WaypointTransmitter.isChunkVisible(this.source.chunkPosition(), this.receiver);
+         }
+     }
+ 
+@@ -192,9 +_,12 @@
+ 
+         @Override
+         public boolean isBroken() {
+-            return WaypointTransmitter.ChunkConnection.super.isBroken()
++            if (!REUSE_ENTITY_CONNECTIONS) return WaypointTransmitter.ChunkConnection.super.isBroken()
+                 || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
+                 || WaypointTransmitter.isChunkVisible(this.lastPosition, this.receiver);
++            return WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
++                || WaypointTransmitter.isReallyFar(this.source, this.receiver)
++                || WaypointTransmitter.isChunkVisible(this.source.chunkPosition(), this.receiver);
+         }
+     }
+ }

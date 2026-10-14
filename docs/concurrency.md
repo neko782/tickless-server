@@ -13,7 +13,37 @@ The **server thread** keeps the parts that are global by nature:
 - the game clock (game time, day time, weather, world border, sleeping),
 - the chunk system (tickets, loading, unloading, saving, lighting hand-off),
 - networking: player packets, connection maintenance, chunk sending,
-- the entity tracker, commands and datapack functions.
+- tracker membership/pairing, commands and datapack functions.
+
+Player tracking deltas run on each player’s worker lane, ordered with gameplay
+packets and simulation steps. Pairing and tracker reads take the same player entity
+lock. Delayed delta jobs coalesce; item-frame map updates remain on the server thread.
+
+Movement publishes dirty waypoint sources and receivers after commit, without
+entering the waypoint manager monitor while holding player locks. A periodic
+server-thread pass refreshes each affected source/receiver connection once from
+the latest positions. Registration, removal and connection state retain their
+monitor protection. This avoids repeated locator-bar scans and the lock convoy
+they caused during dense combat. `-Dtickless.coalesceWaypoints=false` retains the
+immediate-update path for comparisons.
+
+Established connections skip the pending-action monitor when that queue is empty.
+Server gameplay packets use a per-connection FIFO and one scheduled Netty drainer,
+which writes up to 256 packets per turn and flushes once when requested. Callbacks
+remain attached to their real channel futures. Explicit flushes, direct event-loop
+sends and codec changes drain older queued packets first; login/configuration
+packets retain the ordinary path. `-Dtickless.batchPackets=false` and
+`-Dtickless.emptyFlushFastPath=false` retain the control paths. `OutboundBatchCheck`
+uses real Netty local transport to verify packet ordering, concurrent producers,
+flush semantics, pre-connect delivery, callbacks, failed writes and barriers.
+
+Waypoint entity connections now rebuild when their display type changes, rather
+than because the source crossed an arbitrary coordinate-distance threshold.
+Player-list broadcasts, names and lookups use one membership snapshot, including
+sound broadcasts during respawn. Item tracking ignores already removed items;
+new item pairings snapshot a live source under its entity lock. A newly acquired
+main-thread snapshot lock releases when that read completes. Pre-existing locks,
+worker transaction locks and Fabric event locks keep their usual lifetime.
 
 The server's fixed 20 Hz loop services packets, connections, chunk sending,
 and other network work. Scheduled callbacks handle world maintenance, the

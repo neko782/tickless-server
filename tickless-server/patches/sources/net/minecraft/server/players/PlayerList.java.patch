@@ -1,0 +1,81 @@
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -115,7 +_,8 @@
+     private static final int SEND_PLAYER_INFO_INTERVAL = 600;
+     private static final SimpleDateFormat BAN_DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd 'at' HH:mm:ss z", Locale.ROOT);
+     private final MinecraftServer server;
+-    private final List<ServerPlayer> players = Lists.newArrayList();
++    // Player lanes broadcast while joins/respawns change membership on the server thread.
++    private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<>();
+     private final Map<UUID, ServerPlayer> playersByUUID = Maps.newHashMap();
+     private final Map<NameAndId, PermissionLevel> playerPermissions = Maps.newHashMap();
+     private final UserBanList bans;
+@@ -519,8 +_,7 @@
+         if (team == null) {
+             this.broadcastSystemMessage(message, false);
+         } else {
+-            for (int i = 0; i < this.players.size(); i++) {
+-                ServerPlayer targetPlayer = this.players.get(i);
++            for (ServerPlayer targetPlayer : this.players) {
+                 if (targetPlayer.getTeam() != team) {
+                     targetPlayer.sendSystemMessage(message);
+                 }
+@@ -529,11 +_,9 @@
+     }
+ 
+     public String[] getPlayerNamesArray() {
+-        String[] names = new String[this.players.size()];
+-
+-        for (int i = 0; i < this.players.size(); i++) {
+-            names[i] = this.players.get(i).getGameProfile().name();
+-        }
++        ServerPlayer[] snapshot = this.players.toArray(ServerPlayer[]::new);
++        String[] names = new String[snapshot.length];
++        for (int i = 0; i < snapshot.length; i++) names[i] = snapshot[i].getGameProfile().name();
+ 
+         return names;
+     }
+@@ -596,10 +_,7 @@
+     }
+ 
+     public @Nullable ServerPlayer getPlayerByName(final String name) {
+-        int size = this.players.size();
+-
+-        for (int i = 0; i < size; i++) {
+-            ServerPlayer player = this.players.get(i);
++        for (ServerPlayer player : this.players) {
+             if (player.getGameProfile().name().equalsIgnoreCase(name)) {
+                 return player;
+             }
+@@ -617,8 +_,7 @@
+         final ResourceKey<Level> dimension,
+         final Packet<?> packet
+     ) {
+-        for (int i = 0; i < this.players.size(); i++) {
+-            ServerPlayer player = this.players.get(i);
++        for (ServerPlayer player : this.players) {
+             if (player != except && player.level().dimension() == dimension) {
+                 double xd = x - player.getX();
+                 double yd = y - player.getY();
+@@ -631,9 +_,7 @@
+     }
+ 
+     public void saveAll() {
+-        for (int i = 0; i < this.players.size(); i++) {
+-            this.save(this.players.get(i));
+-        }
++        for (ServerPlayer player : this.players) this.save(player);
+     }
+ 
+     public UserWhiteList getWhiteList() {
+@@ -713,9 +_,7 @@
+     }
+ 
+     public void removeAll() {
+-        for (int i = 0; i < this.players.size(); i++) {
+-            this.players.get(i).connection.disconnect(Component.translatable("multiplayer.disconnect.server_shutdown"));
+-        }
++        for (ServerPlayer player : this.players) player.connection.disconnect(Component.translatable("multiplayer.disconnect.server_shutdown"));
+     }
+ 
+     public void broadcastSystemMessage(final Component message, final boolean overlay) {

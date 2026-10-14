@@ -1,16 +1,36 @@
 --- a/net/minecraft/server/level/ServerEntity.java
 +++ b/net/minecraft/server/level/ServerEntity.java
-@@ -76,6 +_,7 @@
+@@ -76,6 +_,9 @@
      private boolean wasRiding;
      private boolean wasOnGround;
      private @Nullable List<SynchedEntityData.DataValue<?>> trackedDataValues;
 +    private boolean trackingSuspended = true;
++    private static final boolean PARALLEL_PLAYERS = Boolean.parseBoolean(System.getProperty("tickless.parallelPlayerTracking", "true"));
++    private final java.util.concurrent.atomic.AtomicBoolean playerTrackingQueued = new java.util.concurrent.atomic.AtomicBoolean();
  
      public ServerEntity(
          final ServerLevel level,
-@@ -101,6 +_,22 @@
+@@ -99,8 +_,40 @@
+         this.trackedDataValues = entity.getEntityData().getNonDefaultValues();
+     }
  
++    /** Coalesces delayed tracker passes; a slow lane cannot accumulate stale sync jobs. */
++    public boolean sendChangesOnPlayerLane() {
++        if (!PARALLEL_PLAYERS || !(this.entity instanceof ServerPlayer player)
++            || player.connection == null || !player.connection.lane().isActive()) return false;
++        if (!this.playerTrackingQueued.compareAndSet(false, true)) return true;
++        if (player.connection.lane().submitTracking(player, this::sendChanges,
++            () -> this.playerTrackingQueued.set(false))) return true;
++        this.playerTrackingQueued.set(false);
++        return false;
++    }
++
++    private void lockPlayerTrackingState() {
++        if (this.entity instanceof ServerPlayer) net.minecraft.world.level.parallel.WorldLocks.lockEntityTree(this.entity);
++    }
++
      public void sendChanges() {
++        this.lockPlayerTrackingState();
          this.entity.updateDataBeforeSync();
 +        if (!this.synchronizer.hasTrackingPlayers() && !(this.entity instanceof ServerPlayer) && !(this.entity instanceof ItemFrame)) {
 +            // Gameplay effects still update above. Packet preparation has no recipients; resume
@@ -31,15 +51,17 @@
          List<Entity> passengers = this.entity.getPassengers();
          if (!passengers.equals(this.lastPassengers)) {
              this.synchronizer.sendToTrackingPlayers(new ClientboundSetPassengersPacket(this.entity));
-@@ -308,6 +_,7 @@
+@@ -307,7 +_,9 @@
+     }
  
      public void sendPairingData(final ServerPlayer player, final Consumer<Packet<ClientGamePacketListener>> broadcast) {
++        this.lockPlayerTrackingState();
          this.entity.updateDataBeforeSync();
 +        this.resumeTracking();
          if (this.entity.isRemoved()) {
              LOGGER.warn("Fetching packet for removed entity {}", this.entity);
          }
-@@ -353,6 +_,23 @@
+@@ -353,23 +_,45 @@
          }
      }
  
@@ -61,8 +83,30 @@
 +    }
 +
      public Vec3 getPositionBase() {
++        this.lockPlayerTrackingState();
          return this.positionCodec.getBase();
      }
+ 
+     public Vec3 getLastSentMovement() {
++        this.lockPlayerTrackingState();
+         return this.lastSentMovement;
+     }
+ 
+     public float getLastSentXRot() {
++        this.lockPlayerTrackingState();
+         return Mth.unpackDegrees(this.lastSentXRot);
+     }
+ 
+     public float getLastSentYRot() {
++        this.lockPlayerTrackingState();
+         return Mth.unpackDegrees(this.lastSentYRot);
+     }
+ 
+     public float getLastSentYHeadRot() {
++        this.lockPlayerTrackingState();
+         return Mth.unpackDegrees(this.lastSentYHeadRot);
+     }
+ 
 @@ -392,6 +_,10 @@
      }
  

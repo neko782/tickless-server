@@ -768,6 +768,31 @@ public final class WorldTxn {
         this.readRadius = -1;
     }
 
+    /**
+     * Protects a read-only snapshot on the server thread without retaining its newly acquired
+     * source lock until the whole event ends. Existing ownership and worker/Fabric event locks
+     * retain their ordinary lifetime; callers must not mutate the source in a short snapshot.
+     */
+    public static void withMainSnapshotLock(final WorldLock lock, final Runnable snapshot) {
+        WorldTxn txn = current();
+        if (txn == null) {
+            snapshot.run();
+            return;
+        }
+        if (!txn.mainThread || FABRIC || lock.isHeldBy(txn)) {
+            txn.lock(lock);
+            snapshot.run();
+            return;
+        }
+        txn.lock(lock);
+        try {
+            snapshot.run();
+        } finally {
+            txn.held.remove(lock);
+            lock.release(txn);
+        }
+    }
+
     /** Releases the server thread's implicit locks. Call only where no world state is half-updated. */
     public static void mainSafePoint() {
         WorldTxn txn = mainTxn;

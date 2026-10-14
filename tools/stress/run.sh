@@ -18,6 +18,9 @@
 # STRESS_GC selects zgc (default) or g1; STRESS_JAVA_OPTS adds explicit test JVM options.
 # STRESS_HEAP selects the maximum server heap (default 6g).
 # STRESS_IMAGE selects the Java Docker image (default eclipse-temurin:27-jdk).
+# BOT_INSTALL selects bot protocol libraries (default build/install/minecraft-server), including for vanilla.
+# arena_ready waits for all arena bots; arena warmup/measure/end controls their measured window.
+# arena_done waits for their drained results. These directives require -Dbot.arenaDir.
 # KEEP_WORLD=1 keeps build/stress-<name>/world from an earlier run (restart tests); the log of
 # the earlier run is kept as out.log.<n>.
 # A "crash" line kills the server without saving or stopping it.
@@ -56,7 +59,7 @@ spawn-protection=0
 max-tick-time=-1
 sync-chunk-writes=false
 gamemode=creative
-max-players=500
+max-players=${STRESS_MAX_PLAYERS:-500}
 white-list=false
 enforce-whitelist=false
 network-compression-threshold=-1
@@ -71,7 +74,12 @@ if [ -n "${DATAPACK:-}" ]; then
   cp -r "$DATAPACK" "$dir/world/datapacks/"
 fi
 
-docker run --rm -i --name "tickless-$name" \
+port_args=
+if [ -n "${STRESS_PUBLISH_PORT:-}" ]; then
+  case "$STRESS_PUBLISH_PORT" in *[!0-9]*) echo 'invalid STRESS_PUBLISH_PORT' >&2; exit 2 ;; esac
+  port_args="-p 127.0.0.1:$STRESS_PUBLISH_PORT:25565"
+fi
+docker run --rm -i $port_args --name "tickless-$name" \
   --user "$(id -u):$(id -g)" \
   -e JAVA_OPTS="-Xmx${STRESS_HEAP:-6g} $gc_opts -Dtickless.statsIntervalSeconds=5 $java_opts" \
   -v "$PWD:/workspace" -w "/workspace/$dir" \
@@ -81,12 +89,14 @@ server=$!
 # A failed directive or external timeout must not leave a server consuming memory.
 watchdog=
 sampler=
+process_sampler=
 cleanup() {
   status=$?
   trap - 0 HUP INT TERM
   docker kill "tickless-$name" > /dev/null 2>&1 || true
   [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null || true
   [ -z "$sampler" ] || kill "$sampler" 2>/dev/null || true
+  [ -z "$process_sampler" ] || kill "$process_sampler" 2>/dev/null || true
   wait "$server" 2>/dev/null || true
   exit "$status"
 }
@@ -140,6 +150,14 @@ watchdog=$!
   done
 ) &
 sampler=$!
+(
+  until docker inspect "tickless-$name" > /dev/null 2>&1; do
+    kill -0 "$server" 2>/dev/null || exit 0
+    sleep 0.1
+  done
+  exec python3 tools/stress/cpu_sample.py "tickless-$name" "$dir/process-cpu.jsonl"
+) > "$dir/process-cpu-sampler.log" 2>&1 &
+process_sampler=$!
 
 exec 3>"$dir/in"
 until grep -q 'Done (' "$dir/out.log" 2>/dev/null; do
@@ -155,8 +173,23 @@ while IFS= read -r line && kill -0 "$server" 2>/dev/null; do
     sleep\ *) sleep "${line#sleep }" ;;
     bots\ *)
       set -- ${line#bots }
-      docker exec "tickless-$name" sh -c "mkdir -p /tmp/bot && javac -nowarn -cp '/workspace/${SERVER_INSTALL:-build/install/minecraft-server}/lib/*' -d /tmp/bot /workspace/tools/BotClient.java && java -Xmx2g ${BOT_OPTS:-} -cp '/tmp/bot:/workspace/${SERVER_INSTALL:-build/install/minecraft-server}/lib/*' BotClient 127.0.0.1 25565 $1 $2" >> "$dir/bots.log" 2>&1 &
+      docker exec "tickless-$name" sh -c "mkdir -p /tmp/bot && javac -nowarn -cp '/workspace/${BOT_INSTALL:-build/install/minecraft-server}/lib/*' -d /tmp/bot /workspace/tools/BotClient.java && java -Xmx${BOT_HEAP:-2g} ${BOT_OPTS:-} -cp '/tmp/bot:/workspace/${BOT_INSTALL:-build/install/minecraft-server}/lib/*' BotClient 127.0.0.1 25565 $1 $2" >> "$dir/bots.log" 2>&1 &
       ;;
+    arena_ready|arena_done)
+      deadline=$(( $(date +%s) + ${ARENA_WAIT_TIMEOUT:-180} ))
+      while :; do
+        if [ "$line" = arena_ready ] && [ -f "$dir/arena-ready" ]; then break; fi
+        if [ "$line" = arena_done ] && grep -q 'ARENA_COMPLETE seconds=' "$dir/bots.log" 2>/dev/null; then break; fi
+        if ! kill -0 "$server" 2>/dev/null || [ "$(date +%s)" -ge "$deadline" ]; then
+          if [ ! -f "$dir/failure.txt" ]; then
+            printf 'arena directive timed out: %s\n' "$line" > "$dir/failure.txt"
+          fi
+          exit 1
+        fi
+        sleep 0.1
+      done
+      ;;
+    arena\ *) touch "$dir/arena-${line#arena }" ;;
     poll\ *)
       # poll SECONDS COMMAND: runs COMMAND (then a game time query) every POLL_INTERVAL s until it passes.
       set -f
@@ -193,7 +226,7 @@ done < "$commands"
 printf 'stop\n' >&3 2>/dev/null || true
 server_status=0
 wait "$server" || server_status=$?
-kill "$watchdog" "$sampler" 2>/dev/null || true
+kill "$watchdog" "$sampler" "$process_sampler" 2>/dev/null || true
 exec 3>&-
 echo "log: $dir/out.log"
 printf '%s\n' "$server_status" > "$dir/exit-code.txt"

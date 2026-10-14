@@ -60,14 +60,44 @@
      }
  
      public void setHealth(final float health) {
-@@ -1176,6 +_,7 @@
+@@ -1176,16 +_,17 @@
  
      @Override
      public boolean hurtServer(final ServerLevel level, final DamageSource source, float damage) {
 +        net.minecraft.world.level.parallel.WorldLocks.lockEntity(this);
          if (this.isInvulnerableTo(level, source)) {
-             return false;
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this,"invulnerable");
          }
+ 
+         if (this.isDeadOrDying()) {
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this,"target_dead");
+         }
+ 
+         if (source.is(DamageTypeTags.IS_FIRE) && this.hasEffect(MobEffects.FIRE_RESISTANCE)) {
+-            return false;
++            return net.minecraft.server.level.AttackAudit.reject(this,"fire_resistance");
+         }
+ 
+         if (this.isSleeping()) {
+@@ -1218,7 +_,7 @@
+         boolean tookFullDamage = true;
+         if (this.damageCooldownTime > 10.0F && !source.is(DamageTypeTags.BYPASSES_COOLDOWN)) {
+             if (damage <= this.lastHurt) {
+-                return false;
++                return net.minecraft.server.level.AttackAudit.reject(this,"damage_cooldown");
+             }
+ 
+             this.actuallyHurt(level, source, damage - this.lastHurt);
+@@ -1287,6 +_,7 @@
+             CriteriaTriggers.PLAYER_HURT_ENTITY.trigger(sourcePlayer, this, source, originalDamage, damage, blocked);
+         }
+ 
++        if (!success) net.minecraft.server.level.AttackAudit.reason(this,"fully_blocked");
+         return success;
+     }
+ 
 @@ -1645,6 +_,7 @@
      }
  

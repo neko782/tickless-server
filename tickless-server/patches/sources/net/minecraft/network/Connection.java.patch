@@ -1,0 +1,139 @@
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -27,6 +_,9 @@
+ import java.util.Objects;
+ import java.util.Queue;
+ import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.atomic.AtomicBoolean;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
+ import java.util.function.Consumer;
+ import javax.crypto.Cipher;
+ import net.minecraft.SharedConstants;
+@@ -65,6 +_,12 @@
+     private final PacketFlow receiving;
+     private volatile boolean sendLoginDisconnect = true;
+     private final Queue<Consumer<Connection>> pendingActions = Queues.newConcurrentLinkedQueue();
++    private static final boolean FAST_EMPTY_QUEUE = Boolean.parseBoolean(System.getProperty("tickless.emptyFlushFastPath", "true"));
++    private static final boolean BATCH_PACKETS = Boolean.parseBoolean(System.getProperty("tickless.batchPackets", "true"));
++    private static final int OUTBOUND_BATCH = 256;
++    private record OutboundPacket(Packet<?> packet, @Nullable ChannelFutureListener listener, boolean flush) {}
++    private final ConcurrentLinkedQueue<OutboundPacket> outboundPackets = new ConcurrentLinkedQueue<>();
++    private final AtomicBoolean outboundScheduled = new AtomicBoolean();
+     private Channel channel;
+     private SocketAddress address;
+     private volatile @Nullable PacketListener disconnectListener;
+@@ -195,6 +_,7 @@
+     }
+ 
+     public <T extends PacketListener> void setupInboundProtocol(final ProtocolInfo<T> protocol, final T packetListener) {
++        this.flushOutboundBeforeProtocolChange();
+         this.validateListener(protocol, packetListener);
+         if (protocol.flow() != this.getReceiving()) {
+             throw new IllegalStateException("Invalid inbound protocol: " + protocol.id());
+@@ -213,6 +_,7 @@
+     }
+ 
+     public void setupOutboundProtocol(final ProtocolInfo<?> protocol) {
++        this.flushOutboundBeforeProtocolChange();
+         if (protocol.flow() != this.getSending()) {
+             throw new IllegalStateException("Invalid outbound protocol: " + protocol.id());
+         }
+@@ -298,12 +_,65 @@
+     private void sendPacket(final Packet<?> packet, final @Nullable ChannelFutureListener listener, final boolean flush) {
+         this.sentPackets++;
+         if (this.channel.eventLoop().inEventLoop()) {
++            // A direct event-loop send must not overtake packets already submitted by workers.
++            this.drainAllOutboundPackets();
+             this.doSendPacket(packet, listener, flush);
++        } else if (BATCH_PACKETS && this.receiving == PacketFlow.SERVERBOUND
++            && this.packetListener instanceof ServerGamePacketListenerImpl) {
++            this.outboundPackets.add(new OutboundPacket(packet, listener, flush));
++            this.scheduleOutboundDrain();
+         } else {
+             this.channel.eventLoop().execute(() -> this.doSendPacket(packet, listener, flush));
+         }
+     }
+ 
++    private void scheduleOutboundDrain() {
++        if (!this.outboundPackets.isEmpty() && this.outboundScheduled.compareAndSet(false, true)) {
++            try {
++                this.channel.eventLoop().execute(this::drainOutboundBatch);
++            } catch (RejectedExecutionException failure) {
++                this.outboundScheduled.set(false);
++                throw failure;
++            }
++        }
++    }
++
++    private void drainOutboundBatch() {
++        boolean flush = false;
++        try {
++            for (int i = 0; i < OUTBOUND_BATCH; i++) {
++                OutboundPacket item = this.outboundPackets.poll();
++                if (item == null) break;
++                this.doSendPacket(item.packet(), item.listener(), false);
++                flush |= item.flush();
++            }
++        } finally {
++            try {
++                if (flush) this.channel.flush();
++            } finally {
++                this.outboundScheduled.set(false);
++                this.scheduleOutboundDrain();
++            }
++        }
++    }
++
++    /** Event-loop barrier used by explicit flushes, direct sends and protocol changes. */
++    private void drainAllOutboundPackets() {
++        boolean flush = false;
++        OutboundPacket item;
++        while ((item = this.outboundPackets.poll()) != null) {
++            this.doSendPacket(item.packet(), item.listener(), false);
++            flush |= item.flush();
++        }
++        if (flush) this.channel.flush();
++    }
++
++    private void flushOutboundBeforeProtocolChange() {
++        if (this.channel == null || this.outboundPackets.isEmpty()) return;
++        if (this.channel.eventLoop().inEventLoop()) this.drainAllOutboundPackets();
++        else this.channel.eventLoop().submit(this::drainAllOutboundPackets).syncUninterruptibly();
++    }
++
+     private void doSendPacket(final Packet<?> packet, final @Nullable ChannelFutureListener listener, final boolean flush) {
+         if (listener != null) {
+             ChannelFuture future = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet);
+@@ -325,13 +_,21 @@
+ 
+     private void flush() {
+         if (this.channel.eventLoop().inEventLoop()) {
++            this.drainAllOutboundPackets();
+             this.channel.flush();
+         } else {
+-            this.channel.eventLoop().execute(() -> this.channel.flush());
++            this.channel.eventLoop().execute(() -> {
++                this.drainAllOutboundPackets();
++                this.channel.flush();
++            });
+         }
+     }
+ 
+     private void flushQueue() {
++        // Late pre-connect offers are still drained by the next send or connection tick.
++        // Established gameplay sends normally have nothing to drain; avoid taking a shared
++        // monitor (and transaction monitor hooks) for every broadcast recipient.
++        if (FAST_EMPTY_QUEUE && this.pendingActions.isEmpty()) return;
+         if (this.channel != null && this.channel.isOpen()) {
+             synchronized (this.pendingActions) {
+                 Consumer<Connection> pendingAction;
+@@ -353,7 +_,7 @@
+         }
+ 
+         if (this.channel != null) {
+-            this.channel.flush();
++            this.flush();
+         }
+ 
+         if (this.tickCount++ % 20 == 0) {

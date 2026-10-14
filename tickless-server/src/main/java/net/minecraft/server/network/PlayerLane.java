@@ -21,7 +21,7 @@ import org.slf4j.Logger;
 /**
  * Runs one player's packets and simulation steps in order, on world workers.
  *
- * <p>The server thread keeps the connection alive, sends chunks and runs the entity tracker; it
+ * <p>The server thread keeps the connection alive, sends chunks and maintains tracker membership; it
  * never runs a player's world work, so it never waits for a world lock on a player's behalf. Before,
  * a player's movement or block packet that needed a lock held by a big explosion stopped the server
  * thread, and with it every player's connection, for as long as the explosion ran.
@@ -110,6 +110,30 @@ public final class PlayerLane {
                 WorldLocks.lockEntityTree(player);
                 step.run();
             }, player);
+        });
+        return true;
+    }
+
+    /** Tracking shares the player's packet order, without making the server thread wait. */
+    public boolean submitTracking(final ServerPlayer player, final Runnable action, final Runnable completed) {
+        if (!this.isActive()) return false;
+        this.submit(() -> {
+            try {
+                BlockPos pos = player.blockPosition();
+                this.server.worldWorkers().runEvent(pos.getX(), pos.getY(), pos.getZ(), true, () -> {
+                    WorldTxn txn = WorldTxn.current();
+                    if (txn != null) txn.disableReadLocks();
+                    WorldLocks.lockEntityTree(player);
+                    if (!player.isRemoved()) {
+                        // Tracker codec/cache mutations are not world undo-log state. Acquire the
+                        // source entity first, then finish this short update without replaying it.
+                        WorldTxn.makeIrrevocable();
+                        action.run();
+                    }
+                }, "player tracking");
+            } finally {
+                completed.run();
+            }
         });
         return true;
     }
