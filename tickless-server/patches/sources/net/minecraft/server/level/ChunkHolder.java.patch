@@ -110,3 +110,22 @@
      }
  
      private void broadcastBlockEntity(final List<ServerPlayer> players, final Level level, final BlockPos blockPos) {
+@@ -262,7 +_,17 @@
+         CompletableFuture<Void> confirmation = new CompletableFuture<>();
+         confirmation.thenRunAsync(() -> scheduler.onFullChunkStatusChange(this.pos, status), mainThreadExecutor);
+         this.pendingFullStateConfirmation = confirmation;
+-        task.thenAccept(r -> r.ifSuccess(l -> confirmation.complete(null)));
++        // Entity readiness can complete before the queued block-ticking preparation.
++        // A later promotion cancels the block confirmation, so wait for its preparation
++        // here too; otherwise the listener sees no ticking chunk and its timers never start.
++        if (status.isOrAfter(FullChunkStatus.BLOCK_TICKING)) {
++            task.thenCombine(this.tickingChunkFuture, (result, ticking) ->
++                result.isSuccess() && ticking.isSuccess()).thenAccept(ready -> {
++                    if (ready) confirmation.complete(null);
++                });
++        } else {
++            task.thenAccept(r -> r.ifSuccess(l -> confirmation.complete(null)));
++        }
+     }
+ 
+     private void demoteFullChunk(final ChunkMap scheduler, final FullChunkStatus status) {

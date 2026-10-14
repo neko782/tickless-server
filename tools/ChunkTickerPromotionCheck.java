@@ -46,6 +46,8 @@ public class ChunkTickerPromotionCheck {
         set(chunk, LevelChunk.class, "tickersInLevel", new ConcurrentHashMap<>());
         ChunkHolder current = (ChunkHolder)unsafe.allocateInstance(ChunkHolder.class);
         ChunkHolder obsolete = (ChunkHolder)unsafe.allocateInstance(ChunkHolder.class);
+        set(current, GenerationChunkHolder.class, "pos", pos);
+        set(obsolete, GenerationChunkHolder.class, "pos", pos);
         set(current, ChunkHolder.class, "tickingChunkFuture", CompletableFuture.completedFuture(ChunkResult.of(chunk)));
         set(obsolete, ChunkHolder.class, "tickingChunkFuture", CompletableFuture.completedFuture(ChunkHolder.UNLOADED_LEVEL_CHUNK));
         current.setTicketLevel(ChunkLevel.byStatus(FullChunkStatus.BLOCK_TICKING));
@@ -80,6 +82,23 @@ public class ChunkTickerPromotionCheck {
         updating.remove(pos.pack());
         map.onFullChunkStatusChange(pos, FullChunkStatus.BLOCK_TICKING);
         if (!ticking.isEmpty()) throw new AssertionError("Absent current holder activated an obsolete chunk");
-        System.out.println("ChunkTickerPromotionCheck passed: hot-reader status publication, unpublished/new holder, stale/replaced holder, demotion and missing current holder");
+        // ENTITY_TICKING's range future can finish before the queued BLOCK_TICKING
+        // preparation. The higher promotion replaces the lower confirmation; it must
+        // still wait for block readiness or its only notification loses the timers.
+        updating.put(pos.pack(), current);
+        var blockReady = new CompletableFuture<ChunkResult<LevelChunk>>();
+        var entityReady = new CompletableFuture<ChunkResult<LevelChunk>>();
+        set(current, ChunkHolder.class, "tickingChunkFuture", blockReady);
+        set(current, ChunkHolder.class, "pendingFullStateConfirmation", CompletableFuture.completedFuture(null));
+        var notifications = new java.util.concurrent.atomic.AtomicInteger();
+        set(map, ChunkMap.class, "chunkStatusListener", (net.minecraft.world.level.entity.ChunkStatusUpdateListener)(p, status) -> notifications.incrementAndGet());
+        var promotion = ChunkHolder.class.getDeclaredMethod("scheduleFullChunkPromotion", ChunkMap.class, CompletableFuture.class, java.util.concurrent.Executor.class, FullChunkStatus.class);
+        promotion.setAccessible(true);
+        promotion.invoke(current, map, entityReady, (java.util.concurrent.Executor)Runnable::run, FullChunkStatus.ENTITY_TICKING);
+        entityReady.complete(ChunkResult.of(chunk));
+        if (notifications.get() != 0 || !ticking.isEmpty()) throw new AssertionError("Entity promotion notified before block preparation");
+        blockReady.complete(ChunkResult.of(chunk));
+        if (notifications.get() != 1 || !ticking.containsKey(pos.pack())) throw new AssertionError("Out-of-order preparation lost chunk timers");
+        System.out.println("ChunkTickerPromotionCheck passed: hot-reader status publication, unpublished/new holder, stale/replaced holder, demotion, missing current holder and out-of-order preparation");
     }
 }
