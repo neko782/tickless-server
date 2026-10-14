@@ -11,7 +11,7 @@ The target is a server a normal player cannot tell apart from vanilla, not a bit
 Tickless is a set of patches on the vanilla server, built with Paper's
 [paperweight](https://github.com/PaperMC/paperweight) on top of
 [Mâché](https://github.com/PaperMC/mache). It is **not** a Paper fork and has no Bukkit/Paper
-plugin API.
+plugin API. Fabric server mods are supported by the separate Fabric distribution.
 
 ## Numbers
 
@@ -115,7 +115,7 @@ stacks, chunk reloads, frozen entities or scheduled ticks. See [docs/soundness.m
 - **Run on Java 27.** On Java 25 (Temurin 25.0.4.1), the JVM's garbage collector occasionally
   crashed (G1 and ZGC) during 100-fireball storms and 60,000-entity summons with virtual threads.
   The build still targets Java 25, but run it on Java 27, where those workloads have not crashed.
-- No plugin API. Datapacks work.
+- No Bukkit/Paper plugin API. Datapacks and compatible Fabric server mods work.
 
 Do not run this on a world you care about without backups.
 
@@ -140,6 +140,60 @@ first.
 Options (`-D...`): `tickless.workers=N` (carrier threads, default cores − 1),
 `tickless.virtualThreads=false` (fixed platform-thread pool), `tickless.statsIntervalSeconds=N`
 (log worker statistics).
+
+## Fabric mods
+
+Build the Fabric distribution and put **26.3 server-side Fabric mods** in the `mods/`
+directory of your server working directory:
+
+```sh
+./build.sh installFabric
+./gradlew --stop
+mkdir -p run-fabric/mods
+# Copy Fabric API for 26.3 and your server mods into run-fabric/mods/.
+cd run-fabric
+printf 'eula=true\n' > eula.txt    # only after accepting Minecraft's EULA
+JAVA_OPTS='-Xmx4g -XX:+UseZGC' ../build/install/fabric/bin/minecraft-server --nogui
+```
+
+Use Java 27, as for the plain distribution. Set `JAVA_HOME` if it is not your default Java.
+Copy the entire `build/install/fabric/` directory when installing on another machine; the
+launcher needs its `lib/` and `agent/` directories. Mods and world files belong in the working
+directory. The distribution includes Fabric Loader 0.19.5; Fabric API is a mod you install
+separately. `installFabric` does not install the verification probe or download test mods.
+
+This launches the patched server through Fabric's Knot loader. Minecraft 26.3 uses official,
+unobfuscated names ([Fabric's mapping documentation](https://docs.fabricmc.net/develop/porting/mappings/)),
+so 26.3 mods need no intermediary remapping. Mixins see the patched bytecode before an ownership
+agent transforms the final classes, including injected field writes and mod-defined entities.
+All Tickless timers and parallel world workers remain enabled.
+
+Ordinary mod callbacks reached in a rollbackable world transaction cause that transaction to
+roll back and replay on the server thread before executing mod code. This protects ordinary
+mod state from concurrent entity callbacks; a mod that hooks every entity tick can therefore
+reduce throughput substantially. It does not serialize unrelated worker events. Mods spawning
+their own threads must still obey Minecraft's world-access rules. Native code, reflection and
+unsafe access cannot be made safe by a field-write transformer.
+
+The launcher refuses overwritten original methods in Tickless-patched classes, removal of
+scheduler/ownership operations, and optional injections that match zero callbacks in patched
+classes. Startup reports **`Tickless Fabric mixin conflict`**, the target and conflicting
+operation/injection, rather than accepting missing behavior. A callback first reached after an
+irrevocable partial commit also stops the server with its callback name and an explanation.
+Optimization mods that replace vanilla ticking internals can conflict; support is determined
+per mod/version, not promised for every Fabric mod. Client-only mods are outside this server's
+scope. Mod mixins depending on exact vanilla loop structure may need adaptations.
+
+The tested unmodified Modrinth releases are Fabric API **0.162.0+26.3**, **Chunky 1.5.3**,
+**LuckPerms 5.5.85** and **spark 1.10.187**. Verification exercises chunk pregeneration,
+permission writes/reads, TPS/tick-duration output, and an additional test mod with tick, damage, death
+and block-change mixins plus Fabric damage/death and chunk-unload events. See
+[Fabric performance and verification](docs/benchmarks.md#fabric-mod-support) for results against
+main, the production mod set and the diagnostic probe. The full verification command is in
+[CONTRIBUTING.md](CONTRIBUTING.md#fabric-development-and-verification).
+Two 24k comparisons retain plain entity throughput within 0.2% of the reviewed main build;
+Fabric with the production mod set has about 4.3% lower entity throughput. The full Fabric suite
+passed 32 focused checks, 221 soundness checks and five inventory audits.
 
 ## Developing
 

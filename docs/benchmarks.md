@@ -597,3 +597,61 @@ LOCK_WAIT_KILL=0 SERVER_INSTALL=build/install-base TIMEOUT=400 tools/stress/run.
 LOCK_WAIT_KILL=0 SERVER_INSTALL=build/install-dev TIMEOUT=400 tools/stress/run.sh ub32-dev2 build/undo-32k-marked.txt
 python3 tools/stress/bench_entities.py build/stress-ub32-*/out.log
 ```
+
+## Fabric mod support
+
+The 2026-10-14 performance review found a 36% entity-rate regression against the reviewed
+`build/install/main` artifact. Bisecting `15552f5`, `17d66f0` and `3099eeb` reproduced it in all
+three (12.93, 13.12 and 13.05 entity steps/s). The docs commit had identical runtime classes;
+removing the Fabric scheduler bridges, UndoFields changes and transaction hot-method changes
+individually did not restore speed.
+
+The reviewed main artifact contained older generated Minecraft classes: its entity-unload
+method lacked the exclusive drain in `2b17e71`. A clean build of `2b17e71` also reproduced the
+slowdown: 12.70 entity / 19.80 chunk steps/s, using 19.2 CPU cores. After closing admission, the server could leave a completed drain waiting until the
+next 50 ms network slot. Servicing drained exclusive work from idle task polling, with a
+100 microsecond wait cap while admission is closed, restored 19.97 entity steps/s in the
+isolating run. The unload protection stays enabled. `IdleDrainCheck` covers idle completion;
+all unload and promotion checks remain in the full suite. The promotion negative control
+against clean main fails with `Entity promotion notified before block preparation`.
+
+Final comparisons used Temurin 27+35, ZGC, a 4 GB heap, 31 carriers, fresh worlds,
+24,000 mobs, 15 s warmup and a 30 s measurement window. The second paired run reversed
+server order. These are two samples, not confidence intervals. "Main" below is the reviewed
+installation with older generated classes, retained unchanged as the requested fast baseline.
+
+| Server | Run 1 entity / chunk steps/s | Run 2 entity / chunk steps/s | CPU cores, run 1 / 2 |
+| --- | ---: | ---: | ---: |
+| Reviewed main install | 20.00 / 19.07 | 19.94 / 19.02 | 28.8 / 29.9 |
+| Plain branch | 19.96 / 19.62 | 19.96 / 19.30 | 28.4 / 29.1 |
+| Fabric, production mods | 19.06 / 19.48 | 19.18 / 18.85 | 29.6 / 29.8 |
+| Fabric, same mods plus diagnostic probe | 19.23 / 19.45 | 19.28 / 19.39 | 29.7 / 29.8 |
+
+Plain entity throughput differs from main by at most 0.2%. Production Fabric entity throughput
+is 4.3% lower on average. The probe samples are slightly faster within this small sample's
+variation; they do not establish that adding the probe improves performance. Every one of
+these eight runs conserved exactly 135,424 items and passed the log/error checks. Reproduce
+with `STRESS_HEAP=4g STRESS_MODS=build/fabric-benchmark-mods tools/stress/compare.sh LABEL
+24000 15 30 main plain fabric`; repeat with reversed server order. Production mods are the
+unmodified Modrinth Fabric API 0.162.0+26.3, Chunky 1.5.3, LuckPerms 5.5.85 and spark 1.10.187.
+The benchmark mod directory contains those four pinned jars, without the diagnostic probe.
+
+`BUILD=0 TICKLESS_FABRIC=1 STRESS_HEAP=4g GRAPH_SEED=20261014 ./test.sh 5` passed after
+building both distributions: all 32 focused checks, all 221 soundness checks and five inventory
+audits; basic conserved 65,536 items and graph conserved 193,872. Smoke loaded 47 mods, completed
+Chunky's nine-chunk task, wrote/read a LuckPerms permission and returned spark TPS/tick-duration
+output with no errors. Both overwrite and zero-match optional injection controls were refused.
+Selected output, verbatim:
+
+```text
+TICKLESS_PROBE PASS ticks=1280 damage_mixins=2560 damage_events=64 death_mixins=64 death_events=64 block_mixins=64 chunk_unload_events=2 worker_threads=1265 concurrent_ticks=53 legacy_main_ticks=16
+ALL FIVE SOUNDNESS WORKLOADS PASSED
+PASS IdleDrainCheck
+PASS FabricRealModsAndParallelCallbacks
+PASS FabricConflict-optional (refused with explicit conflict message)
+PASS FabricConflict-overwrite (refused with explicit conflict message)
+ALL PASSED
+```
+
+Logs remain local under ignored `build/`: `r2-test-final.log`, `stress-fabric-verified/out.log`,
+`r2-production-{a,b}.txt`, `r2-probe-overhead-{a,b}.txt` and their `stress-cmp-*/` worlds/logs.
